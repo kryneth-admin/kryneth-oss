@@ -1,0 +1,100 @@
+[package]
+name = "kryneth_gateway"
+version = "0.1.0"
+edition = "2021"
+
+resolver = "2"
+
+[lib]
+name = "kryneth_gateway"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kryneth_gateway"
+path = "src/main.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# ── Web Framework ──────────────────────────────────────────────────────────────
+# axum: Tokio-native, ergonomic HTTP framework built on top of hyper.
+# Chosen over Actix-web for its first-class tower middleware & async streams.
+axum = { version = "0.7", features = ["json"] }
+
+# ── Async Runtime ──────────────────────────────────────────────────────────────
+# tokio: The de-facto async runtime for Rust.
+# "full" enables all features: I/O, timers, macros, multi-thread scheduler.
+tokio = { version = "1", features = ["full"] }
+
+# ── HTTP Client ────────────────────────────────────────────────────────────────
+# reqwest: Ergonomic async HTTP client built on hyper.
+# Used to forward requests upstream to OpenAI/Anthropic.
+# "json" feature enables automatic serde serialization of request/response bodies.
+# "stream" enables streaming response bodies back to the client.
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# ── Serialization ──────────────────────────────────────────────────────────────
+# serde + serde_json: Industry-standard serialization framework.
+# "derive" macro generates Serialize/Deserialize implementations automatically.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+simd-json = "0.13"
+dashmap = "6"
+bumpalo = { version = "3", features = ["collections"] }
+ahash = "0.8"
+
+# ── Environment Variables ──────────────────────────────────────────────────────
+# dotenvy: Modern, maintained fork of dotenv. Loads .env at runtime.
+dotenvy = "0.15"
+
+# ── Structured Logging ────────────────────────────────────────────────────────
+# tracing: Zero-cost structured, async-aware diagnostics for Rust.
+# tracing-subscriber: Formats and outputs trace events (console, JSON, etc.)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Error Handling ────────────────────────────────────────────────────────────
+# thiserror: Derives std::error::Error cleanly for custom error enums.
+# Avoids boilerplate; idiomatic Rust error design.
+thiserror = "1"
+
+regex = "1.10"
+
+# ── HTTP Primitives ────────────────────────────────────────────────────────────
+# http: Shared types for HTTP (StatusCode, HeaderMap, etc.) used across crates.
+http = "1"
+
+# ── Async Stream Utilities ────────────────────────────────────────────────────
+# tokio-stream: Adapters for working with async streams (reqwest response body).
+tokio-stream = "0.1"
+
+# ── Date/Time Handling ─────────────────────────────────────────────────────────
+# chrono: Date and time library for Rust. Required for DateTime<Utc> in domain models.
+chrono = { version = "0.4", features = ["serde"] }
+
+uuid = { version = "1.22.0", features = ["v4", "serde"] }
+tower-http = { version = "0.6.8", features = ["cors"] }
+jsonwebtoken = "9"
+aes-gcm = "0.10"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+eventsource-stream = "0.2.3"
+futures = "0.3.32"
+bytes = "1.11.1"
+tiktoken-rs = "0.6"
+moka = { version = "0.12.15", features = ["future", "sync"] }
+arc-swap = "1.7.1"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"
+tokio-stream = { version = "0.1", features = ["net"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,21 @@
+# Default Kryneth OSS Routing Configuration
+"00000000-0000-0000-0000-000000000000":
+  "llama-3.3-70b-versatile":
+    targets:
+      - priority: 1
+        weight: 100
+        api_key_alias: "GROQ_API_KEY"
+        api_key: ""
+        provider_name: "groq"
+        base_url: "https://api.groq.com/openai/v1"
+        target_model: "llama-3.3-70b-versatile"
+        schema_format: "openai"
+      - priority: 2
+        weight: 100
+        api_key_alias: "COHERE_API_KEY"
+        api_key: ""
+        provider_name: "cohere"
+        base_url: "https://api.cohere.ai/compatibility/v1"
+        target_model: "command-r-plus-08-2024"
+        schema_format: "openai"
+    rate_limit_rpm: 60

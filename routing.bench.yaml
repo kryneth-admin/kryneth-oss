@@ -1,0 +1,13 @@
+# Kryneth Gateway Benchmark Routing Configuration
+"00000000-0000-0000-0000-000000000000":
+  "mock-model":
+    targets:
+      - priority: 1
+        weight: 100
+        api_key_alias: "MOCK_API_KEY"
+        api_key: "mock_key_value"
+        provider_name: "openai"
+        base_url: "http://localhost:8090/v1"
+        target_model: "mock-model"
+        schema_format: "openai"
+    rate_limit_rpm: 1000000

@@ -1,0 +1,61 @@
+# ------------------------------------------------------------------------------
+# Stage 1: Builder
+# ------------------------------------------------------------------------------
+# Use the official Rust image as the build environment.
+FROM rust:1.77-slim-bookworm AS builder
+
+# Set the working directory inside the container.
+WORKDIR /usr/src/kryneth_gateway
+
+# Install build dependencies (pkg-config and libssl-dev are often needed for Rust networking crates).
+RUN apt-get update && \
+    apt-get install -y pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy the Cargo files first to cache dependencies.
+# This prevents re-downloading crates if only the source code changes.
+COPY Cargo.toml Cargo.lock ./
+
+# Create a dummy main file to build the dependencies.
+# We use the `--no-default-features` flag as requested for the OSS build.
+RUN mkdir src && \
+    echo "fn main() {}" > src/main.rs && \
+    cargo build --release --no-default-features
+
+# Now, copy the actual source code.
+COPY src ./src
+
+# The previous dummy build created a cached artifact for main.rs.
+# We must touch the real main.rs to ensure Cargo recompiles it.
+RUN touch src/main.rs
+
+# Build the final release binary using only OSS features.
+RUN cargo build --release --no-default-features
+
+# ------------------------------------------------------------------------------
+# Stage 2: Runtime
+# ------------------------------------------------------------------------------
+# Use a minimal Debian image for the final runtime to keep it small.
+FROM debian:bookworm-slim
+
+# Set the working directory.
+WORKDIR /app
+
+# Install runtime dependencies (like CA certificates for HTTPS requests).
+RUN apt-get update && \
+    apt-get install -y ca-certificates libssl3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for security.
+RUN useradd -ms /bin/bash kryneth
+RUN chown -R kryneth:kryneth /app
+USER kryneth
+
+# Copy the compiled binary from the builder stage.
+COPY --from=builder --chown=kryneth:kryneth /usr/src/kryneth_gateway/target/release/kryneth_gateway .
+
+# Expose the default gateway port.
+EXPOSE 8080
+
+# Run the binary.
+CMD ["./kryneth_gateway"]

@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  kryneth-gateway:
+    container_name: kryneth-gateway-oss
+    build:
+      context: .
+      dockerfile: Dockerfile.yml
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - ./routing.yaml:/app/routing.yaml
+    restart: unless-stopped
