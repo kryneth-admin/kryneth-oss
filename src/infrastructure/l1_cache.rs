@@ -118,9 +118,7 @@ impl L1Cache {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_millis(150)) // Set smooth overhead window
                 .build()
-                .map_err(|e| {
-                    GatewayError::ResponseBuild(format!("Failed to build client: {e}"))
-                })?;
+                .map_err(|e| GatewayError::ResponseBuild(format!("Failed to build client: {e}")))?;
 
             EmbeddingClient::Tcp {
                 endpoint: url.to_string(),

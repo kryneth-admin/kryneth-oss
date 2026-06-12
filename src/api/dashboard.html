@@ -8,7 +8,7 @@
     <!-- Premium Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;500;600;700;800;900&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     
     <!-- Tailwind CSS Play CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -18,24 +18,42 @@
             theme: {
                 extend: {
                     fontFamily: {
-                        sans: ['Outfit', 'sans-serif'],
-                        mono: ['JetBrains Mono', 'monospace'],
+                        sans: ['IBM Plex Sans', 'sans-serif'],
+                        mono: ['Space Mono', 'monospace'],
+                        display: ['Inter', 'sans-serif'],
                     },
                     colors: {
-                        obsidian: {
-                            50: '#F4F5F7',
-                            100: '#EAECF0',
-                            900: '#0B0F19',
-                            800: '#111827',
-                            700: '#1F2937',
-                            600: '#374151',
+                        brutal: {
+                            dark: '#0D0D0D',
+                            darklight: '#1A1A1A',
+                            light: '#FFFFFF',
+                            lightgray: '#F5F5F5',
+                            gray: '#E8E8E8',
                         },
+                        neon: {
+                            emerald: '#00D084',
+                            cyan: '#00E5FF',
+                            indigo: '#5B5BFF',
+                            orange: '#FF6B35',
+                            teal: '#1AADB8',
+                            amber: '#FFB700',
+                            purple: '#A855F7',
+                            rose: '#F41E78',
+                        }
                     },
                     boxShadow: {
-                        'neon-emerald': '0 0 20px rgba(16, 185, 129, 0.15)',
-                        'neon-cyan': '0 0 20px rgba(6, 182, 212, 0.15)',
-                        'neon-purple': '0 0 20px rgba(139, 92, 246, 0.15)',
-                        'neon-rose': '0 0 20px rgba(244, 63, 94, 0.25)',
+                        'brutal-sm': '4px 4px 0px rgba(0,0,0,0.25)',
+                        'brutal-md': '6px 6px 0px rgba(0,0,0,0.35)',
+                        'brutal-lg': '8px 8px 0px rgba(0,0,0,0.45)',
+                        'brutal-emerald': '6px 6px 0px #00D084',
+                        'brutal-cyan': '6px 6px 0px #00E5FF',
+                        'brutal-indigo': '6px 6px 0px #5B5BFF',
+                        'brutal-orange': '6px 6px 0px #FF6B35',
+                    },
+                    borderWidth: {
+                        '3': '3px',
+                        '4': '4px',
+                        '5': '5px',
                     }
                 }
             }
@@ -46,358 +64,745 @@
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     
     <style>
-        body {
-            font-family: 'Outfit', sans-serif;
-            background-color: #0B0F19;
-            color: #F4F5F7;
+        :root {
+            --color-primary: #00D084;
+            --color-secondary: #00E5FF;
+            --color-accent: #5B5BFF;
+            --color-warning: #FF6B35;
+            --color-success: #1AADB8;
+            --color-focus: #FFB700;
+            --bg-dark: #0D0D0D;
+            --bg-light: #FFFFFF;
+            --text-dark: #000000;
+            --text-light: #FFFFFF;
         }
+
+        html.light {
+            --bg-main: var(--bg-light);
+            --bg-card: #F5F5F5;
+            --bg-secondary: #EEEEEE;
+            --text-main: var(--text-dark);
+            --text-secondary: #4A4A4A;
+            --border-color: #000000;
+        }
+
+        html.dark {
+            --bg-main: var(--bg-dark);
+            --bg-card: #1A1A1A;
+            --bg-secondary: #272727;
+            --text-main: var(--text-light);
+            --text-secondary: #B0B0B0;
+            --border-color: #FFFFFF;
+        }
+
+        * {
+            transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+        }
+
+        body {
+            font-family: 'IBM Plex Sans', sans-serif;
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            letter-spacing: 0.5px;
+        }
+
+        .neo-card {
+            background-color: var(--bg-card);
+            border: 3px solid var(--border-color);
+            box-shadow: 8px 8px 0px rgba(0, 0, 0, 0.25);
+            transition: all 0.2s ease;
+        }
+
+        .neo-card:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 10px 10px 0px rgba(0, 0, 0, 0.35);
+        }
+
+        .neo-button {
+            border: 3px solid var(--border-color);
+            font-weight: 700;
+            letter-spacing: 1px;
+            transition: all 0.15s ease;
+            text-transform: uppercase;
+            font-size: 12px;
+        }
+
+        .neo-button:hover {
+            transform: translate(-2px, -2px);
+            box-shadow: 4px 4px 0px rgba(0, 0, 0, 0.3);
+        }
+
+        .neo-button:active {
+            transform: translate(0, 0);
+            box-shadow: 0 0 0;
+        }
+
+        .metric-card {
+            position: relative;
+            overflow: hidden;
+        }
+
+        .metric-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: linear-gradient(90deg, var(--color-primary), var(--color-secondary), var(--color-accent), var(--color-warning));
+        }
+
         @keyframes pulse-rose {
             0%, 100% {
-                box-shadow: 0 0 20px rgba(244, 63, 94, 0.25);
+                box-shadow: 8px 8px 0px rgba(244, 63, 94, 0.4), inset 0 0 20px rgba(244, 63, 94, 0.1);
             }
             50% {
-                box-shadow: 0 0 35px rgba(244, 63, 94, 0.6);
-                background-color: rgba(244, 63, 94, 0.08);
+                box-shadow: 8px 8px 0px rgba(244, 63, 94, 0.7), inset 0 0 30px rgba(244, 63, 94, 0.2);
+                background-color: rgba(244, 63, 94, 0.15);
             }
         }
+
         .pulse-alert {
             animation: pulse-rose 1.5s infinite;
         }
+
         .metric-transition {
             transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
+
+        .gradient-text {
+            background: linear-gradient(135deg, var(--color-primary), var(--color-secondary), var(--color-accent));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            font-weight: 900;
+            letter-spacing: 2px;
+        }
+
+        .theme-toggle {
+            position: relative;
+            display: inline-flex;
+            background-color: var(--bg-secondary);
+            border: 3px solid var(--border-color);
+            border-radius: 0;
+            padding: 2px;
+        }
+
+        .theme-toggle button {
+            padding: 6px 12px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 11px;
+            letter-spacing: 1px;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+
+        .theme-toggle button.active {
+            background-color: var(--color-primary);
+            color: var(--text-dark);
+            box-shadow: inset 2px 2px 0px rgba(0, 0, 0, 0.2);
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            background-color: var(--color-primary);
+            border: 2px solid var(--border-color);
+            animation: pulse-status 2s infinite;
+        }
+
+        @keyframes pulse-status {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        html.light .shadow-dark {
+            box-shadow: 8px 8px 0px rgba(0, 0, 0, 0.3);
+        }
+
+        html.dark .shadow-dark {
+            box-shadow: 8px 8px 0px rgba(0, 0, 0, 0.5);
+        }
     </style>
 </head>
-<body class="min-h-screen antialiased bg-obsidian-900 overflow-x-hidden selection:bg-cyan-500/20 selection:text-cyan-300">
+<body class="min-h-screen antialiased overflow-x-hidden">
 
-    <!-- Glowing Top Banner Accent -->
-    <div class="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-emerald-500 via-cyan-500 to-purple-600"></div>
+    <!-- Neo-Brutalism Header Accent -->
+    <div class="absolute top-0 left-0 right-0 h-1 bg-black dark:bg-white"></div>
 
     <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 relative">
-        <!-- Header -->
-        <header class="mb-10 flex flex-col md:flex-row md:items-center md:justify-between border-b border-obsidian-700/30 pb-6">
-            <div>
-                <div class="flex items-center space-x-3 mb-1">
-                    <h1 class="text-3xl font-extrabold tracking-tight bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
-                        KRYNETH GATEWAY
+        <!-- Header with Theme Toggle -->
+        <header class="mb-12 flex flex-col md:flex-row md:items-center md:justify-between border-4 border-current p-6 neo-card">
+            <div class="flex-1">
+                <div class="flex items-center space-x-4 mb-2">
+                    <h1 class="text-5xl font-black tracking-widest gradient-text font-display">
+                        KRYNETH
                     </h1>
-                    <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_15px_rgba(16,185,129,0.1)]">
-                        OSS MODE
-                    </span>
+                    <div class="px-3 py-1 bg-current border-3 border-current">
+                        <span class="text-xs font-black tracking-widest text-white dark:text-black">GATEWAY</span>
+                    </div>
                 </div>
-                <p class="text-sm text-slate-400">
-                    Ephemeral Admin Analytics & Behavior Guardian Console
+                <p class="text-sm font-bold tracking-wider text-slate-600 dark:text-slate-300 uppercase">
+                    Ephemeral Admin Analytics &amp; Behavior Guardian Console
                 </p>
             </div>
-            <div class="mt-4 md:mt-0 flex items-center space-x-3">
-                <div class="flex items-center space-x-2 bg-obsidian-800/80 px-3 py-1.5 rounded-lg border border-obsidian-700/40 text-xs">
-                    <span class="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    <span class="text-slate-300 font-medium">Gateway Online</span>
+            
+            <!-- Theme Toggle and Controls -->
+            <div class="mt-6 md:mt-0 flex flex-col md:flex-row gap-4 items-start md:items-center">
+                <div class="theme-toggle">
+                    <button class="active" onclick="toggleTheme('dark')" title="Dark Theme">
+                        🌙 Dark
+                    </button>
+                    <button onclick="toggleTheme('light')" title="Light Theme">
+                        ☀️ Light
+                    </button>
                 </div>
-                <button onclick="resetMetrics()" class="px-3 py-1.5 bg-obsidian-700/50 hover:bg-obsidian-700 hover:text-white rounded-lg border border-obsidian-600/30 text-xs text-slate-300 transition duration-150">
-                    Reset View
+                
+                <div class="neo-card px-4 py-3 flex items-center space-x-3 border-3">
+                    <div class="status-indicator"></div>
+                    <span class="text-xs font-bold tracking-wider uppercase">Online</span>
+                </div>
+                
+                <button onclick="resetMetrics()" class="neo-button px-4 py-3 bg-current hover:bg-opacity-90">
+                    ↻ Reset
                 </button>
             </div>
         </header>
 
         <!-- Metrics Grid -->
-        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8 mb-12">
             <!-- Metric 1: Live RPS -->
-            <div class="bg-obsidian-800/40 backdrop-blur-md rounded-xl p-6 border border-obsidian-700/50 shadow-neon-emerald metric-transition">
-                <div class="flex items-center justify-between mb-4">
-                    <span class="text-sm font-semibold text-slate-400">Live RPS</span>
-                    <div class="p-2 bg-emerald-500/10 rounded-lg text-emerald-400">
-                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            <div class="neo-card metric-card p-6 border-4 border-current bg-gradient-to-br from-current to-current" style="--current-color: var(--color-primary);">
+                <div class="flex items-center justify-between mb-6 pb-4 border-b-3 border-current">
+                    <span class="text-xs font-black tracking-widest uppercase">Live RPS</span>
+                    <div class="p-3 bg-current border-3 border-current text-black">
+                        <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M13 10V3L4 14h7v7l9-11h-7z" />
                         </svg>
                     </div>
                 </div>
-                <div class="flex items-baseline">
-                    <span id="metric-rps" class="text-4xl font-extrabold tracking-tight text-white font-mono">0.0</span>
-                    <span class="ml-2 text-xs font-medium text-emerald-400">req/s</span>
+                <div class="flex items-baseline gap-2">
+                    <span id="metric-rps" class="text-5xl font-black font-mono tracking-tight">0.0</span>
+                    <span class="text-xs font-bold tracking-wider uppercase">req/s</span>
                 </div>
-                <div class="mt-2 text-xs text-slate-500">
-                    Requests per second (1s poll)
+                <div class="mt-4 pt-4 border-t-3 border-current border-opacity-30">
+                    <p class="text-xs font-medium tracking-wider">Requests per second</p>
                 </div>
             </div>
 
             <!-- Metric 2: Avg Latency -->
-            <div class="bg-obsidian-800/40 backdrop-blur-md rounded-xl p-6 border border-obsidian-700/50 shadow-neon-cyan metric-transition">
-                <div class="flex items-center justify-between mb-4">
-                    <span class="text-sm font-semibold text-slate-400">Avg Latency</span>
-                    <div class="p-2 bg-cyan-500/10 rounded-lg text-cyan-400">
-                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            <div class="neo-card metric-card p-6 border-4 border-current" style="--current-color: var(--color-secondary);">
+                <div class="flex items-center justify-between mb-6 pb-4 border-b-3 border-current">
+                    <span class="text-xs font-black tracking-widest uppercase">Avg Latency</span>
+                    <div class="p-3 bg-current border-3 border-current text-black">
+                        <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                     </div>
                 </div>
-                <div class="flex items-baseline">
-                    <span id="metric-latency" class="text-4xl font-extrabold tracking-tight text-white font-mono">0</span>
-                    <span class="ml-2 text-xs font-medium text-cyan-400">ms</span>
+                <div class="flex items-baseline gap-2">
+                    <span id="metric-latency" class="text-5xl font-black font-mono tracking-tight">0</span>
+                    <span class="text-xs font-bold tracking-wider uppercase">ms</span>
                 </div>
-                <div class="mt-2 text-xs text-slate-500">
-                    Cumulative average request latency
+                <div class="mt-4 pt-4 border-t-3 border-current border-opacity-30">
+                    <p class="text-xs font-medium tracking-wider">Cumulative average latency</p>
                 </div>
             </div>
 
             <!-- Metric 3: Total Tokens -->
-            <div class="bg-obsidian-800/40 backdrop-blur-md rounded-xl p-6 border border-obsidian-700/50 shadow-neon-purple metric-transition">
-                <div class="flex items-center justify-between mb-4">
-                    <span class="text-sm font-semibold text-slate-400">Total Tokens</span>
-                    <div class="p-2 bg-purple-500/10 rounded-lg text-purple-400">
-                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            <div class="neo-card metric-card p-6 border-4 border-current" style="--current-color: var(--color-accent);">
+                <div class="flex items-center justify-between mb-6 pb-4 border-b-3 border-current">
+                    <span class="text-xs font-black tracking-widest uppercase">Total Tokens</span>
+                    <div class="p-3 bg-current border-3 border-current text-black">
+                        <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
                     </div>
                 </div>
-                <div class="flex items-baseline">
-                    <span id="metric-tokens" class="text-4xl font-extrabold tracking-tight text-white font-mono">0</span>
-                    <span class="ml-2 text-xs font-medium text-purple-400">tokens</span>
+                <div class="flex items-baseline gap-2">
+                    <span id="metric-tokens" class="text-5xl font-black font-mono tracking-tight">0</span>
+                    <span class="text-xs font-bold tracking-wider uppercase">tokens</span>
                 </div>
-                <div class="mt-2 text-xs text-slate-500">
-                    Estimated LLM tokens processed
+                <div class="mt-4 pt-4 border-t-3 border-current border-opacity-30">
+                    <p class="text-xs font-medium tracking-wider">LLM tokens processed</p>
                 </div>
             </div>
 
             <!-- Metric 4: Agent Loops Blocked -->
-            <div id="card-blocked" class="bg-obsidian-800/40 backdrop-blur-md rounded-xl p-6 border border-obsidian-700/50 shadow-neon-rose metric-transition">
-                <div class="flex items-center justify-between mb-4">
-                    <span class="text-sm font-semibold text-slate-400">Loops Blocked</span>
-                    <div class="p-2 bg-rose-500/10 rounded-lg text-rose-500">
-                        <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            <div id="card-blocked" class="neo-card metric-card p-6 border-4 border-current" style="--current-color: var(--color-warning);">
+                <div class="flex items-center justify-between mb-6 pb-4 border-b-3 border-current">
+                    <span class="text-xs font-black tracking-widest uppercase">Loops Blocked</span>
+                    <div class="p-3 bg-current border-3 border-current text-black">
+                        <svg class="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                         </svg>
                     </div>
                 </div>
-                <div class="flex items-baseline">
-                    <span id="metric-blocked" class="text-4xl font-extrabold tracking-tight text-white font-mono">0</span>
-                    <span class="ml-2 text-xs font-medium text-rose-400">blocks</span>
+                <div class="flex items-baseline gap-2">
+                    <span id="metric-blocked" class="text-5xl font-black font-mono tracking-tight">0</span>
+                    <span class="text-xs font-bold tracking-wider uppercase">blocks</span>
                 </div>
-                <div class="mt-2 text-xs text-slate-500">
-                    Runaway loops / tool storms stopped
+                <div class="mt-4 pt-4 border-t-3 border-current border-opacity-30">
+                    <p class="text-xs font-medium tracking-wider">Runaway loops stopped</p>
                 </div>
             </div>
         </div>
 
         <!-- Chart Section -->
-        <div class="bg-obsidian-800/30 border border-obsidian-700/40 backdrop-blur-md rounded-xl p-6 mb-8">
-            <h2 class="text-lg font-semibold text-white mb-4 flex items-center space-x-2">
-                <span>Real-time Telemetry (30s Rolling)</span>
-                <span class="h-2 w-2 rounded-full bg-cyan-400 animate-ping"></span>
-            </h2>
-            <div class="relative w-full" style="height: 380px;">
+        <div class="neo-card border-4 border-current p-8 mb-12">
+            <div class="flex items-center justify-between mb-8 pb-6 border-b-4 border-current">
+                <h2 class="text-2xl font-black tracking-wider uppercase flex items-center gap-3">
+                    <span>Real-time Telemetry</span>
+                    <div class="status-indicator"></div>
+                </h2>
+                <span class="text-xs font-bold tracking-widest uppercase bg-current text-black px-3 py-1 border-2 border-current">30s ROLLING</span>
+            </div>
+            <div class="relative w-full" style="height: 400px;">
                 <canvas id="liveChart"></canvas>
             </div>
         </div>
 
         <!-- Footer / Diagnostics -->
-        <footer class="text-center text-xs text-slate-500 border-t border-obsidian-700/20 pt-6">
-            <div class="flex flex-col sm:flex-row items-center justify-between">
+        <footer class="neo-card border-4 border-current p-6 text-center text-xs font-bold tracking-wider uppercase">
+            <div class="flex flex-col md:flex-row items-center justify-between gap-4">
                 <div>
                     Kryneth AI Engine Gateway Core v0.1.0 (OSS Edition)
                 </div>
-                <div class="mt-2 sm:mt-0 flex items-center space-x-4">
-                    <span class="hover:text-slate-300 cursor-pointer" onclick="alert('Local storage cleared'); location.reload();">Clear Session</span>
-                    <span>&bull;</span>
-                    <a href="https://github.com/redeyegatewayoffcial-admin/RedEye-Engine-Gateway" target="_blank" class="hover:text-slate-300">Documentation</a>
+                <div class="flex items-center justify-center gap-3 border-l-3 border-r-3 border-current px-4 py-2">
+                    <span class="hover:opacity-60 cursor-pointer transition-opacity" onclick="clearSession();">CLEAR SESSION</span>
+                    <span class="text-xl">•</span>
+                    <a href="https://github.com/kryneth-admin/kryneth-oss/tree/master/docs" target="_blank" class="hover:opacity-60 transition-opacity">DOCS</a>
                 </div>
             </div>
         </footer>
     </div>
 
     <script>
-        // Data stores
-        let lastRequests = 0;
-        let lastTimestamp = 0;
-        let chart = null;
-        let blockedLoopsCount = 0;
+        // Dashboard Module - Encapsulated State Management
+        const Dashboard = (() => {
+            const state = {
+                lastRequests: 0,
+                lastTimestamp: 0,
+                chart: null,
+                blockedLoopsCount: 0,
+                pollInterval: null,
+                isPolling: false,
+                lastError: null
+            };
 
-        // Rolling Chart Configuration
-        const chartCtx = document.getElementById('liveChart').getContext('2d');
-        const chartData = {
-            labels: [],
-            datasets: [
-                {
-                    label: 'Live RPS (req/s)',
-                    data: [],
-                    borderColor: '#10B981',
-                    backgroundColor: 'rgba(16, 185, 129, 0.05)',
-                    borderWidth: 2,
-                    tension: 0.3,
-                    fill: true,
-                    yAxisID: 'y-rps'
-                },
-                {
-                    label: 'Avg Latency (ms)',
-                    data: [],
-                    borderColor: '#06B6D4',
-                    backgroundColor: 'rgba(6, 182, 212, 0.05)',
-                    borderWidth: 2,
-                    tension: 0.3,
-                    fill: true,
-                    yAxisID: 'y-latency'
-                }
-            ]
-        };
+            const cache = {
+                metrics: {},
+                chartCtx: null,
+                html: document.documentElement,
+                buttons: {}
+            };
 
-        function initChart() {
-            chart = new Chart(chartCtx, {
-                type: 'line',
-                data: chartData,
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    scales: {
-                        x: {
-                            grid: {
-                                color: 'rgba(31, 41, 55, 0.3)'
-                            },
-                            ticks: {
-                                color: '#94A3B8',
-                                font: {
-                                    family: 'JetBrains Mono',
-                                    size: 10
-                                }
-                            }
-                        },
-                        'y-rps': {
-                            type: 'linear',
-                            position: 'left',
-                            min: 0,
-                            grid: {
-                                color: 'rgba(31, 41, 55, 0.3)'
-                            },
-                            ticks: {
-                                color: '#10B981',
-                                font: {
-                                    family: 'JetBrains Mono',
-                                    size: 10
-                                }
-                            },
-                            title: {
-                                display: true,
-                                text: 'Requests / Second',
-                                color: '#10B981'
-                            }
-                        },
-                        'y-latency': {
-                            type: 'linear',
-                            position: 'right',
-                            min: 0,
-                            grid: {
-                                drawOnChartArea: false // only show grid for left axis
-                            },
-                            ticks: {
-                                color: '#06B6D4',
-                                font: {
-                                    family: 'JetBrains Mono',
-                                    size: 10
-                                }
-                            },
-                            title: {
-                                display: true,
-                                text: 'Latency (ms)',
-                                color: '#06B6D4'
-                            }
-                        }
+            const chartData = {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Live RPS (req/s)',
+                        data: [],
+                        borderColor: 'rgb(0, 208, 132)',
+                        backgroundColor: 'rgba(0, 208, 132, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: true,
+                        yAxisID: 'y-rps'
                     },
-                    plugins: {
-                        legend: {
-                            labels: {
-                                color: '#F4F5F7',
-                                font: {
-                                    family: 'Outfit',
-                                    size: 12
+                    {
+                        label: 'Avg Latency (ms)',
+                        data: [],
+                        borderColor: 'rgb(0, 229, 255)',
+                        backgroundColor: 'rgba(0, 229, 255, 0.1)',
+                        borderWidth: 3,
+                        tension: 0.4,
+                        fill: true,
+                        yAxisID: 'y-latency'
+                    }
+                ]
+            };
+
+            // Safe DOM element getter
+            const getElement = (id) => {
+                const el = document.getElementById(id);
+                if (!el) console.warn(`Element not found: ${id}`);
+                return el;
+            };
+
+            // Cache all DOM elements on init
+            const cacheElements = () => {
+                cache.metrics = {
+                    rps: getElement('metric-rps'),
+                    latency: getElement('metric-latency'),
+                    tokens: getElement('metric-tokens'),
+                    blocked: getElement('metric-blocked'),
+                    cardBlocked: getElement('card-blocked')
+                };
+                cache.buttons = {
+                    dark: document.querySelector('[data-theme="dark"]'),
+                    light: document.querySelector('[data-theme="light"]')
+                };
+                
+                const chartEl = getElement('liveChart');
+                if (chartEl) {
+                    cache.chartCtx = chartEl.getContext('2d');
+                } else {
+                    console.error('Chart canvas not found');
+                }
+            };
+
+            // Fixed Theme Management
+            const toggleTheme = (theme, button) => {
+                cache.html.classList.remove('light', 'dark');
+                
+                if (theme === 'dark') {
+                    cache.html.classList.add('dark');
+                    localStorage.setItem('theme', 'dark');
+                } else {
+                    cache.html.classList.add('light');
+                    localStorage.setItem('theme', 'light');
+                }
+                
+                // Update button states
+                document.querySelectorAll('.theme-toggle button').forEach(btn => {
+                    btn.classList.toggle('active', btn === button);
+                });
+                
+                // Safely update chart
+                if (state.chart && state.chart.options && state.chart.options.scales) {
+                    updateChartColors();
+                    state.chart.update();
+                }
+            };
+
+            const initializeTheme = () => {
+                const savedTheme = localStorage.getItem('theme') || 'dark';
+                const button = savedTheme === 'dark' ? cache.buttons.dark : cache.buttons.light;
+                
+                cache.html.classList.remove('light', 'dark');
+                cache.html.classList.add(savedTheme);
+                
+                if (button) {
+                    document.querySelectorAll('.theme-toggle button').forEach(btn => {
+                        btn.classList.toggle('active', btn === button);
+                    });
+                }
+            };
+
+            const clearSession = () => {
+                if (confirm('Clear all session data? This will reset metrics and chart.')) {
+                    localStorage.clear();
+                    location.reload();
+                }
+            };
+
+            const updateChartColors = () => {
+                if (!state.chart || !state.chart.options) return;
+                
+                const isDark = cache.html.classList.contains('dark');
+                const gridColor = isDark ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)';
+                const textColor = isDark ? '#FFFFFF' : '#000000';
+                
+                try {
+                    state.chart.options.scales.x.grid.color = gridColor;
+                    state.chart.options.scales.x.ticks.color = textColor;
+                    state.chart.options.scales['y-rps'].grid.color = gridColor;
+                    state.chart.options.scales['y-rps'].ticks.color = 'rgb(0, 208, 132)';
+                    state.chart.options.scales['y-latency'].ticks.color = 'rgb(0, 229, 255)';
+                    state.chart.options.plugins.legend.labels.color = textColor;
+                } catch (err) {
+                    console.error('Chart color update failed:', err);
+                }
+            };
+
+
+            const initChart = () => {
+                if (!cache.chartCtx) {
+                    console.error('Cannot initialize chart: canvas context unavailable');
+                    return;
+                }
+
+                try {
+                    state.chart = new Chart(cache.chartCtx, {
+                        type: 'line',
+                        data: chartData,
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                x: {
+                                    grid: {
+                                        color: 'rgba(255, 255, 255, 0.1)',
+                                        lineWidth: 2
+                                    },
+                                    ticks: {
+                                        color: '#FFFFFF',
+                                        font: {
+                                            family: 'Space Mono',
+                                            size: 11,
+                                            weight: '700'
+                                        }
+                                    }
+                                },
+                                'y-rps': {
+                                    type: 'linear',
+                                    position: 'left',
+                                    min: 0,
+                                    grid: {
+                                        color: 'rgba(255, 255, 255, 0.1)',
+                                        lineWidth: 2
+                                    },
+                                    ticks: {
+                                        color: 'rgb(0, 208, 132)',
+                                        font: {
+                                            family: 'Space Mono',
+                                            size: 11,
+                                            weight: '700'
+                                        }
+                                    },
+                                    title: {
+                                        display: true,
+                                        text: 'Requests / Second',
+                                        color: 'rgb(0, 208, 132)',
+                                        font: {
+                                            weight: 'bold',
+                                            size: 12
+                                        }
+                                    }
+                                },
+                                'y-latency': {
+                                    type: 'linear',
+                                    position: 'right',
+                                    min: 0,
+                                    grid: {
+                                        drawOnChartArea: false
+                                    },
+                                    ticks: {
+                                        color: 'rgb(0, 229, 255)',
+                                        font: {
+                                            family: 'Space Mono',
+                                            size: 11,
+                                            weight: '700'
+                                        }
+                                    },
+                                    title: {
+                                        display: true,
+                                        text: 'Latency (ms)',
+                                        color: 'rgb(0, 229, 255)',
+                                        font: {
+                                            weight: 'bold',
+                                            size: 12
+                                        }
+                                    }
+                                }
+                            },
+                            plugins: {
+                                legend: {
+                                    labels: {
+                                        color: '#FFFFFF',
+                                        font: {
+                                            family: 'IBM Plex Sans',
+                                            size: 13,
+                                            weight: 'bold'
+                                        },
+                                        padding: 20,
+                                        usePointStyle: true,
+                                        pointStyle: 'rect'
+                                    }
                                 }
                             }
                         }
-                    }
+                    });
+                } catch (err) {
+                    console.error('Chart initialization failed:', err);
                 }
-            });
-        }
+            };
 
-        async function pollMetrics() {
-            try {
-                const response = await fetch('/v1/admin/metrics/live');
-                if (!response.ok) {
-                    throw new Error('Metrics endpoint unreachable');
-                }
-                const data = await response.json();
+            const pollMetrics = async () => {
+                // Prevent overlapping requests
+                if (state.isPolling) return;
                 
-                // Parse metrics
-                const totalRequests = data.total_requests || 0;
-                const avgLatency = Math.round(data.avg_latency_ms || 0);
-                const totalTokens = data.total_tokens || 0;
-                const blockedLoops = data.blocked_agent_loops || 0;
-                const timestamp = data.timestamp || Date.now() / 1000;
-
-                // Calculate RPS
-                let rps = 0.0;
-                if (lastTimestamp > 0) {
-                    const timeDelta = timestamp - lastTimestamp;
-                    if (timeDelta > 0) {
-                        rps = parseFloat(((totalRequests - lastRequests) / timeDelta).toFixed(2));
-                    }
-                }
-
-                // Update DOM Values
-                document.getElementById('metric-rps').textContent = rps.toFixed(1);
-                document.getElementById('metric-latency').textContent = avgLatency;
-                document.getElementById('metric-tokens').textContent = totalTokens.toLocaleString();
-                document.getElementById('metric-blocked').textContent = blockedLoops;
-
-                // Pulse Alert if loops blocked increases
-                const cardBlocked = document.getElementById('card-blocked');
-                if (blockedLoops > blockedLoopsCount) {
-                    cardBlocked.classList.add('pulse-alert');
-                    setTimeout(() => {
-                        cardBlocked.classList.remove('pulse-alert');
-                    }, 5000); // Pulse for 5 seconds
-                }
-                blockedLoopsCount = blockedLoops;
-
-                // Update Chart
-                const nowLabel = new Date(timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                state.isPolling = true;
                 
-                chartData.labels.push(nowLabel);
-                chartData.datasets[0].data.push(rps);
-                chartData.datasets[1].data.push(avgLatency);
+                try {
+                    const response = await fetch('/v1/admin/metrics/live');
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
+                    
+                    // Parse metrics with defaults
+                    const totalRequests = data.total_requests ?? 0;
+                    const avgLatency = Math.round(data.avg_latency_ms ?? 0);
+                    const totalTokens = data.total_tokens ?? 0;
+                    const blockedLoops = data.blocked_agent_loops ?? 0;
+                    const timestamp = data.timestamp ?? Date.now() / 1000;
 
-                // Keep last 30 data points (30s window)
-                if (chartData.labels.length > 30) {
-                    chartData.labels.shift();
-                    chartData.datasets[0].data.shift();
-                    chartData.datasets[1].data.shift();
+                    // Calculate RPS
+                    let rps = 0.0;
+                    if (state.lastTimestamp > 0) {
+                        const timeDelta = timestamp - state.lastTimestamp;
+                        if (timeDelta > 0) {
+                            rps = parseFloat(((totalRequests - state.lastRequests) / timeDelta).toFixed(2));
+                        }
+                    }
+
+                    // Update DOM Values - with null checks
+                    if (cache.metrics.rps) cache.metrics.rps.textContent = rps.toFixed(1);
+                    if (cache.metrics.latency) cache.metrics.latency.textContent = avgLatency;
+                    if (cache.metrics.tokens) cache.metrics.tokens.textContent = totalTokens.toLocaleString();
+                    if (cache.metrics.blocked) cache.metrics.blocked.textContent = blockedLoops;
+
+                    // Pulse Alert if loops blocked increases
+                    if (blockedLoops > state.blockedLoopsCount && cache.metrics.cardBlocked) {
+                        cache.metrics.cardBlocked.classList.add('pulse-alert');
+                        setTimeout(() => {
+                            cache.metrics.cardBlocked?.classList.remove('pulse-alert');
+                        }, 5000);
+                    }
+                    state.blockedLoopsCount = blockedLoops;
+
+                    // Update Chart
+                    const nowLabel = new Date(timestamp * 1000).toLocaleTimeString([], { 
+                        hour: '2-digit', 
+                        minute: '2-digit', 
+                        second: '2-digit' 
+                    });
+                    
+                    chartData.labels.push(nowLabel);
+                    chartData.datasets[0].data.push(rps);
+                    chartData.datasets[1].data.push(avgLatency);
+
+                    // Keep last 30 data points
+                    const MAX_POINTS = 30;
+                    if (chartData.labels.length > MAX_POINTS) {
+                        chartData.labels.shift();
+                        chartData.datasets[0].data.shift();
+                        chartData.datasets[1].data.shift();
+                    }
+
+                    if (state.chart) {
+                        state.chart.update();
+                    }
+
+                    // Save states
+                    state.lastRequests = totalRequests;
+                    state.lastTimestamp = timestamp;
+                    state.lastError = null;
+
+                } catch (err) {
+                    console.error("Polling error:", err);
+                    state.lastError = err;
+                    
+                    // Update all metrics to error state
+                    ['rps', 'latency', 'tokens', 'blocked'].forEach(key => {
+                        if (cache.metrics[key]) {
+                            cache.metrics[key].textContent = 'ERR';
+                        }
+                    });
+                } finally {
+                    state.isPolling = false;
+                }
+            };
+
+            const resetMetrics = () => {
+                chartData.labels = [];
+                chartData.datasets[0].data = [];
+                chartData.datasets[1].data = [];
+                if (state.chart) {
+                    state.chart.update();
+                }
+                state.lastRequests = 0;
+                state.lastTimestamp = 0;
+            };
+
+            const startPolling = () => {
+                pollMetrics(); // Initial poll
+                state.pollInterval = setInterval(pollMetrics, 1000);
+            };
+
+            const stopPolling = () => {
+                if (state.pollInterval) {
+                    clearInterval(state.pollInterval);
+                    state.pollInterval = null;
+                }
+            };
+
+            const setupEventListeners = () => {
+                // Theme toggle buttons
+                document.querySelectorAll('.theme-toggle button').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const theme = e.target.dataset.theme;
+                        toggleTheme(theme, e.target);
+                    });
+                });
+
+                // Reset button
+                const resetBtn = document.querySelector('[data-action="reset"]') || 
+                                document.querySelector('button[onclick*="resetMetrics"]');
+                if (resetBtn) {
+                    resetBtn.removeAttribute('onclick');
+                    resetBtn.addEventListener('click', resetMetrics);
                 }
 
-                chart.update();
+                // Clear session
+                const clearBtn = document.querySelector('[data-action="clear"]') ||
+                               document.querySelector('span[onclick*="clearSession"]');
+                if (clearBtn) {
+                    clearBtn.removeAttribute('onclick');
+                    clearBtn.addEventListener('click', clearSession);
+                }
 
-                // Save states
-                lastRequests = totalRequests;
-                lastTimestamp = timestamp;
+                // Cleanup on page unload
+                window.addEventListener('beforeunload', () => {
+                    stopPolling();
+                });
+            };
 
-            } catch (err) {
-                console.error("Polling error: ", err);
-                document.getElementById('metric-rps').textContent = "Err";
-                document.getElementById('metric-latency').textContent = "Err";
-            }
-        }
+            const init = () => {
+                cacheElements();
+                initializeTheme();
+                initChart();
+                startPolling();
+                setupEventListeners();
+            };
 
-        function resetMetrics() {
-            chartData.labels = [];
-            chartData.datasets[0].data = [];
-            chartData.datasets[1].data = [];
-            chart.update();
-            lastRequests = 0;
-            lastTimestamp = 0;
-        }
+            // Public API
+            return {
+                init,
+                resetMetrics,
+                toggleTheme,
+                stopPolling
+            };
+        })();
 
         // Initialize on Load
         window.addEventListener('DOMContentLoaded', () => {
-            initChart();
-            pollMetrics();
-            setInterval(pollMetrics, 1000); // poll every 1s
+            Dashboard.init();
         });
+
+        // Export for inline onclick handlers (temporary compatibility)
+        function resetMetrics() {
+            Dashboard.resetMetrics();
+        }
+
+        function clearSession() {
+            if (confirm('Clear all session data? This will reset metrics and chart.')) {
+                localStorage.clear();
+                location.reload();
+            }
+        }
+
+        function toggleTheme(theme) {
+            const button = event?.target;
+            Dashboard.toggleTheme(theme, button);
+        }
     </script>
 </body>
 </html>

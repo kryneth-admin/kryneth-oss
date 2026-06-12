@@ -170,7 +170,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 ## 🏛️ Open-Core Transparency
 
-Kryneth uses a strict, compile-time feature-flag separation (`#[cfg(feature = "enterprise")]`) to ensure the open-source engine remains dependency-free, lock-free, and blazingly fast.
+Kryneth uses a strict, to ensure the open-source engine remains dependency-free, lock-free, and blazingly fast.
 
 | Capability | Open-Source (OSS) | Enterprise Edition |
 | :--- | :--- | :--- |

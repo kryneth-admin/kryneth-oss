@@ -44,7 +44,6 @@ use tracing::warn;
 
 use crate::domain::models::AppState;
 
-
 const MODEL_HEADER: &str = "x-kryneth-model";
 
 pub fn extract_identifiers(headers: &HeaderMap, addr: &SocketAddr) -> (String, String) {
@@ -69,7 +68,6 @@ fn extract_model_name(headers: &HeaderMap) -> Option<String> {
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
 }
-
 
 pub async fn rate_limit_middleware(
     State(state): State<Arc<AppState>>,

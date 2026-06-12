@@ -222,8 +222,6 @@ async fn get_client_config(state: &Arc<AppState>, tenant_id: &str) -> ClientConf
         return cfg.clone();
     }
 
-
-
     ClientConfig {
         tenant_id: tenant_id.to_string(),
         pii_masking_enabled: false,
@@ -760,8 +758,6 @@ fn handle_cache_hit(
     }
 }
 
-
-
 /// Handles SSE streaming: zero-copy stream proxy, fires telemetry on completion.
 #[allow(clippy::too_many_arguments)]
 fn handle_streaming_response(
@@ -891,8 +887,6 @@ fn handle_streaming_response(
         }
 
         let latency_ms = start_time.elapsed().as_millis() as u32;
-
-
 
         let response_bytes = if response_text.is_empty() {
             None
@@ -1044,8 +1038,6 @@ async fn handle_buffered_response(
             estimated_tokens + estimated_completion
         });
 
-
-
     spawn_telemetry(
         state,
         tenant_id,
@@ -1162,8 +1154,6 @@ async fn fire_async_telemetry(
         .dashboard_metrics
         .total_tokens
         .fetch_add(tokens as usize, std::sync::atomic::Ordering::Relaxed);
-
-
 
     let response_content = extract_response_content(response_bytes.as_deref());
 

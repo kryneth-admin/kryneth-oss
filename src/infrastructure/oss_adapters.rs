@@ -3,10 +3,10 @@
 //! These adapters provide clean no-ops or process-local fallbacks for the gateway ports,
 //! keeping compile-time dependencies to a minimum in OSS builds.
 
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use sha2::{Digest, Sha256};
 
 use crate::domain::ports::{
     AuthPort, BillingPort, RateLimitPort, RoutingConfigPort, SemanticCachePort, TelemetryPort,
@@ -72,7 +72,7 @@ impl AuthPort for OssAuth {
                 if trimmed.is_empty() {
                     continue;
                 }
-                
+
                 let mut hasher = Sha256::new();
                 hasher.update(trimmed.as_bytes());
                 let candidate_hash = hex::encode(hasher.finalize());
@@ -111,8 +111,12 @@ impl RateLimitPort for OssRateLimit {
                 tracing::debug!("Resetting process-local rate limit buckets");
                 for entry in cache.iter() {
                     let bucket = entry.value();
-                    bucket.consumed.store(0, std::sync::atomic::Ordering::Relaxed);
-                    bucket.is_blocked.store(false, std::sync::atomic::Ordering::Relaxed);
+                    bucket
+                        .consumed
+                        .store(0, std::sync::atomic::Ordering::Relaxed);
+                    bucket
+                        .is_blocked
+                        .store(false, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });
@@ -124,10 +128,7 @@ impl RateLimitPort for OssRateLimit {
 pub struct OssRoutingConfig;
 
 impl RoutingConfigPort for OssRoutingConfig {
-    fn start_subscriber(
-        &self,
-        _routing_state: Arc<crate::domain::models::RoutingState>,
-    ) {
+    fn start_subscriber(&self, _routing_state: Arc<crate::domain::models::RoutingState>) {
         // OSS is static and loaded from file at boot time
     }
 }

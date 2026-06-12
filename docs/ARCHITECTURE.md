@@ -226,10 +226,6 @@ src/
 - `routing.yaml` file
 - Defaults in code
 
-### Feature Flags
-- `--no-default-features` for minimal OSS build
-- `--features enterprise` for full capabilities
-
 ## Security Considerations
 
 1. **Memory Safety:** Rust + tokio = no buffer overflows, thread-safe by default

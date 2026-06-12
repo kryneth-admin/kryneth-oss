@@ -60,8 +60,6 @@ export MAX_IDENTICAL_TOOL_CALLS=5      # Max identical signatures
 # Standard build with all features
 cargo run --release
 
-# Or OSS build with minimal dependencies
-cargo run --release --no-default-features
 ```
 
 **Output:**
