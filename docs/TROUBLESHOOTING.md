@@ -174,48 +174,13 @@ Ensure tenant ID is a valid UUID:
    - Verify you have at least one working target in routing.yaml
    - Check logs: `RUST_LOG=debug cargo run`
 
-### Tool Storm Threshold Exceeded
+### Agent Runaway Loop Blocked
 
 **Error:**
 ```json
 {
   "error": {
-    "message": "Tool storm threshold exceeded",
-    "type": "tool_limit_error",
-    "code": "MAX_TOOL_CALLS_EXCEEDED"
-  }
-}
-```
-
-**Debugging:**
-
-1. Check current settings:
-   ```bash
-   echo $MAX_SESSION_TOOL_CALLS
-   ```
-
-2. Review agent behavior:
-   - Is agent making too many tool calls in parallel?
-   - Is agent stuck in recursive loop?
-   - Are tool calls actually needed?
-
-3. Adjust limits if needed:
-   ```bash
-   export MAX_SESSION_TOOL_CALLS=50  # Increase threshold
-   ```
-
-4. Fix the root cause:
-   - Improve agent prompt to reduce tool calls
-   - Add early stopping conditions
-   - Implement better tool selection logic
-
-### Infinite Loop Detection Triggered
-
-**Error:**
-```json
-{
-  "error": {
-    "message": "Infinite loop detected - identical tool calls repeated",
+    "message": "Agent infinite loop detected for identical tool signature. Request blocked.",
     "type": "safety_error",
     "code": "LOOP_DETECTED"
   }
@@ -224,41 +189,59 @@ Ensure tenant ID is a valid UUID:
 
 **Debugging:**
 
-1. Check current setting:
+1. Check current limits (`MAX_SESSION_TOOL_CALLS` and `MAX_IDENTICAL_TOOL_CALLS`).
    ```bash
+   echo $MAX_SESSION_TOOL_CALLS
    echo $MAX_IDENTICAL_TOOL_CALLS
    ```
 
 2. Identify the repeated tool:
    - Enable debug logging: `RUST_LOG=debug`
-   - Look for repeating tool name and arguments in logs
+   - Look for repeating tool name and arguments in logs. The loop guardian uses an ahash to trap this in < 2ms.
 
-3. Example issue:
-   ```
-   Call 1: get_weather(location="NYC")
-   Call 2: get_weather(location="NYC")  ← Same call
-   Call 3: get_weather(location="NYC")  ← Same call
-   Call 4: get_weather(location="NYC")  ← Same call
-   Call 5: get_weather(location="NYC")  ← Same call
-   Call 6: get_weather(location="NYC")  ← BLOCKED
-   ```
+3. Fix the agent:
+   - Ensure the agent is prompted to explore different search queries or tools on repeated failures, instead of retrying the exact same signature.
 
-4. Fix the agent:
-   ```python
-   # Bad: Agent might retry on failure
-   for i in range(10):
-       result = get_weather(location)  # Keep retrying same location
-   
-   # Good: Try different approach on failure
-   locations = ["NYC", "LA", "Chicago"]
-   for loc in locations:
-       result = get_weather(location=loc)  # Try different locations
-   ```
-
-5. Adjust threshold if needed:
+4. Adjust threshold if absolutely necessary:
    ```bash
    export MAX_IDENTICAL_TOOL_CALLS=10  # Increase tolerance
+   export MAX_SESSION_TOOL_CALLS=50    # Increase session storm threshold
    ```
+
+### GatewayError::ModelNotConfigured
+
+**Error:**
+```json
+{
+  "error": {
+    "message": "Requested model is not configured for this tenant.",
+    "type": "routing_error",
+    "code": "MODEL_NOT_CONFIGURED"
+  }
+}
+```
+
+**Debugging:**
+1. Check that the `routing.yaml` specifies the virtual `model` requested in the `POST /v1/chat/completions` payload.
+2. Ensure the tenant ID matches the `x-tenant-id` header or the default `00000000-0000-0000-0000-000000000000`.
+
+### OPA Sandbox Fail-Closed Timeouts
+
+**Error:**
+```json
+{
+  "error": {
+    "message": "OPA Sandbox Validation timed out",
+    "type": "security_error",
+    "code": "SECURITY_TIMEOUT"
+  }
+}
+```
+
+**Debugging:**
+By default, the Phase 3 MCP Sandbox Firewall enforces a 200ms timeout against the `COMPLIANCE_URL` OPA server. If OPA is unreachable, it fails **closed**.
+1. To fail **open** during local development, set `SANDBOX_FALLBACK_MODE=open`.
+2. Ensure `COMPLIANCE_URL` is correct and the server is responding within 200ms.
 
 ## Performance Issues
 

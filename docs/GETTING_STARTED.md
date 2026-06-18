@@ -41,8 +41,18 @@ Edit `routing.yaml` at the project root with your tenant ID and provider configu
 ```
 
 ### 3. Set Environment Variables
+Create a `.env` file or export the following variables.
+
 ```bash
-# Export API keys
+# Gateway Auth
+export KRYNETH_VALID_KEYS="dev_secret_123,another_secret_456"
+export JWT_SECRET="dummy-secret-for-local-dev"
+
+# MCP Integrations
+export MCP_TOOL_REGISTRY='{"jira_search": "http://localhost:9000/sse"}'
+export MCP_TOOL_SCHEMA_REGISTRY='[{"name":"jira_search","summary":"Search Jira tickets"}]'
+
+# Upstream API credentials
 export GROQ_API_KEY="gsk_your_groq_key_here"
 export COHERE_API_KEY="h28_your_cohere_key_here"
 
@@ -202,8 +212,15 @@ Kryneth-Gateway-OSS/
 RUST_LOG=info              # Log level: trace, debug, info, warn, error
 
 # Server
-KRYNETH_PORT=8080          # Port to listen on
-KRYNETH_HOST=0.0.0.0       # Host to bind to
+GATEWAY_PORT=8080          # Port to listen on
+
+# Security & Auth
+KRYNETH_VALID_KEYS=secret  # Comma-separated list of valid API keys for OSS auth
+JWT_SECRET=secret          # JWT secret used for session tokens
+
+# MCP Integration
+MCP_TOOL_REGISTRY='{"tool":"http://mcp/sse"}' # JSON object mapping tool names to SSE endpoints
+MCP_TOOL_SCHEMA_REGISTRY='[{"name":"tool"}]'  # JSON array of tool descriptors for Lazy Schema
 
 # Rate Limiting
 RATE_LIMIT_MAX_REQUESTS=60 # Requests per window
@@ -212,10 +229,7 @@ RATE_LIMIT_WINDOW_SECS=60  # Window duration in seconds
 # Agent Safety
 MAX_SESSION_TOOL_CALLS=20      # Max tools per 60s window
 MAX_IDENTICAL_TOOL_CALLS=5     # Max identical tool signatures
-
-# Features (Enterprise)
-ENABLE_ENTERPRISE=false    # Enable enterprise features
-REDIS_URL=redis://...      # Redis connection string
+SANDBOX_FALLBACK_MODE=closed   # Set to 'open' to fail-open on OPA downtime
 ```
 
 ## Troubleshooting

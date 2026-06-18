@@ -57,6 +57,25 @@ Routes LLM requests through the control plane with agent guardrails.
 }
 ```
 
+### GET /v1/admin/metrics/live
+Provides real-time, ephemeral metrics about gateway operations. This endpoint requires admin RBAC authorization.
+
+**Request:**
+```bash
+curl -X GET http://0.0.0.0:8080/v1/admin/metrics/live \
+  -H "Authorization: Bearer <ADMIN_KEY>"
+```
+
+**Response:**
+```json
+{
+  "active_sessions": 42,
+  "blocked_agent_loops": 7,
+  "total_requests": 1500,
+  "cache_hit_rate": 0.85
+}
+```
+
 ## Safety Features
 
 ### Tool Storm Guard

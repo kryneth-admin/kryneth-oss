@@ -3,9 +3,17 @@
 ## Overview
 Kryneth is a blazingly fast, ultra-low latency Rust service built with Axum. It evolved from a simple reverse proxy into an **Agent Runtime Control Plane**. It sits between your AI Agents and upstream LLM providers to orchestrate security, loop prevention, semantic caching, and strict budget enforcement at the edge.
 
-Kryneth operates on a **Dual Architecture**:
-- **OSS Edition**: Runs purely in-memory using lock-free local caches (`Moka` & `DashMap`) and SIMD-accelerated JSON parsing for zero-dependency deployments.
-- **Enterprise Edition**: Seamlessly transitions to distributed state management using Redis, ClickHouse, and PostgreSQL for multi-node Kubernetes deployments.
+## Ports & Adapters (Clean Architecture)
+
+The codebase strictly adheres to the **Ports & Adapters** (Hexagonal Architecture) pattern. Core domain logic and use cases (e.g., `behavior_guard`, `tool_router`) rely entirely on abstract traits ("Ports").
+Concrete implementations ("Adapters") are injected at runtime, enabling Kryneth to operate in two distinct modes via an Open-Core strategy.
+
+## Open-Core Strategy
+
+We use compile-time feature flags (`#[cfg(feature = "enterprise")]`) to conditionally compile different adapter implementations while keeping the core routing engine untouched.
+
+- **OSS Edition**: Runs purely in-process for zero-dependency deployments. It uses `OssRateLimit` and `OssAuth` adapters which rely on local memory mechanisms like `DashMap` and `moka`.
+- **Enterprise Edition**: Seamlessly swaps the adapters to distributed state management (e.g., Redis for rate limiting, PostgreSQL for auth/billing, ClickHouse for telemetry) for multi-node Kubernetes deployments.
 
 ## High-Level Design
 

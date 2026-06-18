@@ -51,6 +51,7 @@ pub async fn orchestrate(
     idempotency_key: Option<&str>,
     is_agentic: bool,
     trace_ctx: &TraceContext,
+    enable_compression: bool,
 ) -> Result<AgenticContext, GatewayError> {
     let mut loop_count: Option<u64> = None;
 
@@ -182,7 +183,7 @@ pub async fn orchestrate(
         let arena = bumpalo::Bump::new();
         match state
             .tool_registry
-            .inject_lazy_summaries(&body_bytes, &arena)
+            .inject_lazy_summaries(&body_bytes, &arena, enable_compression)
         {
             Some(modified) => {
                 info!(

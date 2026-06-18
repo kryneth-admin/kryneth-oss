@@ -1,11 +1,11 @@
-# Kryneth: The L7 Control Plane for AI Agents
+# Kryneth: The Production Reliability & Governance Engine for Autonomous Agents
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/kryneth-admin/kryneth-oss)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://www.docker.com/)
 
-> **Stop LLM budget burn before it happens.** An ultra-low latency, memory-safe Rust firewall and router for autonomous AI agents.
+> **The Production Reliability & Governance Engine for Autonomous Agents.** An ultra-low latency, memory-safe zero-copy Rust firewall and router built on Axum and bumpalo.
 
 ---
 
@@ -15,9 +15,9 @@ Modern API gateways built for deterministic web apps fail under the recursive, n
 
 | Developer Pain Point | Kryneth Edge Solution | Core Mechanism |
 | :--- | :--- | :--- |
-| **Runaway Token Loops**<br>Agents get stuck in recursive retry loops, executing the same tool with identical parameters and burning thousands of dollars overnight. | **Agent Guardian Loop Trap**<br>Traps repetitive tool-call signatures at the edge in **<2ms**—before the request ever hits your wallet. | Sliding window non-cryptographic `ahash` signature comparison & SIMD-accelerated JSON payload extraction. |
-| **Tool Storm Explosions**<br>A single agent task explodes into 50+ nested tool calls within seconds, destroying SaaS unit economics and rate limits. | **Strict Session Budget Ceilings**<br>Enforces hard, session-level token cost and execution bounds to instantly kill cascading workflows. | Process-local maximum tool execution counters per session with instant circuit-tripping. |
-| **Proxy Latency & Memory Bloat**<br>Python-based LLM proxies add 50–100ms latency overhead and introduce security supply-chain risks. | **Engineered in Native Rust**<br>Written in Rust using Axum and `simd-json`. Adds virtually zero overhead (**P90 latency ~2.1ms**). | Compiled memory-safe binary running on Tokio asynchronous runtime with zero runtime dependencies. |
+| **Runaway Token Loops**<br>Agents get stuck in recursive retry loops, executing the same tool with identical parameters and burning thousands of dollars overnight. | **Agent Guardian Loop Trap**<br>Traps repetitive tool-call signatures at the edge in **<2ms** (`behavior_guard.rs`)—before the request hits your wallet. | Sliding window non-cryptographic `ahash` signature comparison & SIMD-accelerated JSON payload extraction. |
+| **The MCP Tax**<br>Sending full JSON schemas for 20+ tools on every turn consumes massive token budgets before reasoning even begins. | **Lazy Schema Injection**<br>Semantically strips parameters on the fly, delivering full schemas only when explicitly requested. | Zero-allocation `bumpalo` arena mutation and `simd-json` scanning. |
+| **Proxy Latency & Memory Bloat**<br>Python-based LLM proxies add 50–100ms latency overhead and introduce security supply-chain risks. | **Zero-Copy Rust Engine**<br>Written in Rust using Axum and `bumpalo`. Adds virtually zero overhead (**P90 latency ~2.1ms**). | Compiled memory-safe binary running on Tokio asynchronous runtime with zero runtime dependencies. |
 
 ---
 

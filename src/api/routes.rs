@@ -104,6 +104,7 @@ fn create_cors_layer() -> CorsLayer {
             axum::http::HeaderName::from_static("x-tenant-id"),
             axum::http::HeaderName::from_static("x-kryneth-routing-strategy"),
             axum::http::HeaderName::from_static("x-kryneth-loop-count"),
+            axum::http::HeaderName::from_static("x-kryneth-context-compression"),
         ])
         .expose_headers([
             axum::http::HeaderName::from_static("x-cache"),

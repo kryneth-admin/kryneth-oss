@@ -1,8 +1,8 @@
 # Contributing to Kryneth Gateway OSS
 
-Thank you for your interest in contributing to Kryneth Gateway! We welcome contributions from developers, systems engineers, and technical writers of all backgrounds. 
+Thank you for contributing to Kryneth Gateway. We maintain strict standards for performance, memory-safety, and latency.
 
-To maintain the high performance and enterprise-ready standards of our open-source control plane, please review the following guidelines before submitting a Pull Request (PR).
+To maintain the high performance and enterprise-ready standards of our zero-copy control plane, please adhere to the following guidelines before submitting a Pull Request (PR).
 
 ---
 
@@ -27,7 +27,7 @@ Please note that Kryneth uses **conditional compilation feature flags** to separ
 
 Because this is the core open-source distribution of Kryneth Gateway, **any submission that fails compilation under the default OSS feature configuration will be blocked.**
 
-Before pushing your changes and opening a pull request, you must run the following validation suite locally:
+Before pushing your changes, run the following validation suite locally:
 
 ### 1. Verification of the OSS Build
 Verify that the package builds successfully without enterprise features:
@@ -46,6 +46,9 @@ All code must pass clippy checks with no warnings:
 ```bash
 cargo clippy --no-default-features -- -D warnings
 ```
+
+### 4. Zero-Copy Constraints
+Ensure new features do not introduce unnecessary heap allocations. The core routing engine and JSON mutation paths (like Lazy Schema injection in `tool_router.rs`) rely on arena allocation via `bumpalo` and `simd-json`. Avoid using `serde_json::Value` on the hot path where possible.
 
 ---
 

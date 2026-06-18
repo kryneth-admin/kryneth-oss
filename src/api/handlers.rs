@@ -117,9 +117,15 @@ pub async fn chat_completions(
         .map(|s| s.trim() == "true")
         .unwrap_or(false);
 
+    let enable_compression = headers
+        .get("x-kryneth-context-compression")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+
     // Phase 1+2+loop-budget via AgenticOrchestrator (extracted from this handler).
     let agentic_ctx = crate::usecases::agentic_orchestrator::orchestrate(
-        &state, body_bytes, tenant_id, api_key, session_id, idem_key, is_agentic, &trace_ctx,
+        &state, body_bytes, tenant_id, api_key, session_id, idem_key, is_agentic, &trace_ctx, enable_compression,
     )
     .await?;
 
@@ -135,6 +141,7 @@ pub async fn chat_completions(
         strategy,
         is_free_tier,
         &extensions,
+        enable_compression,
     )
     .await?;
 

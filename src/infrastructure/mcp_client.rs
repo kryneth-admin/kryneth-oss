@@ -115,6 +115,7 @@ pub async fn fan_out(
     tool_calls: Vec<ToolCall>,
     tenant_id: &str,
     state: &Arc<AppState>,
+    enable_compression: bool,
 ) -> Vec<ToolResult> {
     if tool_calls.is_empty() {
         return Vec::new();
@@ -138,7 +139,7 @@ pub async fn fan_out(
                 // Per-call 5-second hard timeout.
                 match timeout(
                     std::time::Duration::from_secs(5),
-                    execute_single_tool_call(tc.clone(), &tenant_id_c, &state),
+                    execute_single_tool_call(tc.clone(), &tenant_id_c, &state, enable_compression),
                 )
                 .await
                 {
@@ -198,7 +199,7 @@ pub async fn fan_out(
 /// This uniform array is appended to the LLM's next-turn `messages` as a
 /// single `role: "tool"` message, giving the model full context of every
 /// call outcome — successes and timeouts alike.
-pub fn merge_results(results: Vec<ToolResult>) -> Vec<Value> {
+pub fn merge_results(results: Vec<ToolResult>, _enable_compression: bool) -> Vec<Value> {
     results
         .into_iter()
         .map(|r| {
@@ -227,6 +228,7 @@ async fn execute_single_tool_call(
     tc: ToolCall,
     tenant_id: &str,
     state: &Arc<AppState>,
+    enable_compression: bool,
 ) -> ToolResult {
     let start = std::time::Instant::now();
 
@@ -279,7 +281,7 @@ async fn execute_single_tool_call(
 
     match response {
         Ok(resp) if resp.status().is_success() => {
-            let content = extract_mcp_result(resp).await;
+            let content = extract_mcp_result(resp, enable_compression).await;
             info!(
                 tool_name = %tc.name,
                 latency_ms,
@@ -341,10 +343,52 @@ fn parse_arguments(arguments: &str) -> Value {
     serde_json::from_str(arguments).unwrap_or(json!({}))
 }
 
+fn convert_to_toon(json_array: &Vec<serde_json::Value>) -> Result<String, &'static str> {
+    if json_array.is_empty() {
+        return Ok("array[0]{}:".to_string());
+    }
+
+    let first_obj = json_array[0].as_object().ok_or("First element is not an object")?;
+    let mut keys: Vec<&str> = first_obj.keys().map(|k| k.as_str()).collect();
+    keys.sort();
+
+    for val in json_array.iter().skip(1) {
+        let obj = val.as_object().ok_or("Element is not an object")?;
+        if obj.len() != keys.len() {
+            return Err("Heterogeneous JSON");
+        }
+        for k in &keys {
+            if !obj.contains_key(*k) {
+                return Err("Heterogeneous JSON");
+            }
+        }
+    }
+
+    let keys_str = keys.join(",");
+    let mut rows = Vec::new();
+    for val in json_array {
+        let obj = val.as_object().unwrap();
+        let mut row = Vec::new();
+        for k in &keys {
+            let item_val = obj.get(*k).unwrap();
+            let formatted = match item_val {
+                Value::String(s) => s.clone(),
+                Value::Null => "null".to_string(),
+                _ => item_val.to_string(),
+            };
+            row.push(formatted);
+        }
+        rows.push(row.join(","));
+    }
+
+    let rows_str = rows.join(" \n ");
+    Ok(format!("array[{}]{{{}}}: \n {}", json_array.len(), keys_str, rows_str))
+}
+
 /// Reads the MCP server response and extracts the `result.content[0].text`
 /// field as defined by the MCP 2024-11-05 spec, with a fallback to the raw
 /// JSON body on parse failure.
-async fn extract_mcp_result(resp: reqwest::Response) -> String {
+async fn extract_mcp_result(resp: reqwest::Response, enable_compression: bool) -> String {
     let body: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => {
@@ -352,21 +396,26 @@ async fn extract_mcp_result(resp: reqwest::Response) -> String {
         }
     };
 
-    // MCP spec: result.content[0].text
-    if let Some(text) = body
+    let raw_content = if let Some(text) = body
         .pointer("/result/content/0/text")
         .and_then(|v| v.as_str())
     {
-        return text.to_string();
+        text.to_string()
+    } else if let Some(result) = body.get("result") {
+        result.to_string()
+    } else {
+        body.to_string()
+    };
+
+    if enable_compression {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(&raw_content) {
+            if let Ok(toon_str) = convert_to_toon(&arr) {
+                return toon_str;
+            }
+        }
     }
 
-    // Fallback: result as raw JSON
-    if let Some(result) = body.get("result") {
-        return result.to_string();
-    }
-
-    // Last resort: stringify the whole body
-    body.to_string()
+    raw_content
 }
 
 /// Builds the telemetry JSON payload for fan-out metrics.
@@ -475,7 +524,7 @@ mod tests {
             },
         ];
 
-        let merged = merge_results(results);
+        let merged = merge_results(results, false);
         assert_eq!(merged.len(), 2);
 
         // First entry: successful structured result.
@@ -507,7 +556,7 @@ mod tests {
             latency_ms: 50,
             success: true,
         }];
-        let merged = merge_results(results);
+        let merged = merge_results(results, false);
         assert_eq!(
             merged[0]["result"]["text"].as_str(),
             Some("plain text result"),
@@ -548,5 +597,16 @@ mod tests {
         assert_eq!(payload["success_count"], 1);
         assert_eq!(payload["tools"][0]["tool_name"], "jira_search");
         assert_eq!(payload["tools"][0]["tool_latency_ms"], 50);
+    }
+
+    #[test]
+    fn test_toon_converter_fails_on_heterogeneous_data() {
+        let data = vec![
+            serde_json::json!({"id": 1, "status": "active"}),
+            serde_json::json!({"error": "not found", "code": 404}),
+        ];
+        let res = convert_to_toon(&data);
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err(), "Heterogeneous JSON");
     }
 }

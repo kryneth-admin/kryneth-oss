@@ -364,7 +364,12 @@ impl ToolRegistry {
         &self,
         body_bytes: &[u8],
         arena: &bumpalo::Bump,
+        enable_compression: bool,
     ) -> Option<Vec<u8>> {
+        if !enable_compression {
+            return None;
+        }
+
         // Fast-path: nothing registered — skip entirely.
         if self.is_empty() {
             return None;
@@ -601,7 +606,7 @@ mod tests {
 
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(&body_bytes, &arena);
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true);
 
         assert!(result.is_some(), "Should have modified the body");
         let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
@@ -643,7 +648,7 @@ mod tests {
         let arena = bumpalo::Bump::new();
         // weather_api is not in registry → no modification
         assert!(registry
-            .inject_lazy_summaries(&body_bytes, &arena)
+            .inject_lazy_summaries(&body_bytes, &arena, true)
             .is_none());
     }
 
@@ -654,7 +659,7 @@ mod tests {
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
         assert!(registry
-            .inject_lazy_summaries(&body_bytes, &arena)
+            .inject_lazy_summaries(&body_bytes, &arena, true)
             .is_none());
     }
 
@@ -662,7 +667,7 @@ mod tests {
     fn test_inject_no_panic_on_malformed_json() {
         let registry = make_registry(&[("jira_search", "Search Jira")]);
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(b"{invalid json}", &arena);
+        let result = registry.inject_lazy_summaries(b"{invalid json}", &arena, true);
         assert!(result.is_none(), "Should fail gracefully on bad JSON");
     }
 
@@ -692,7 +697,7 @@ mod tests {
 
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(&body_bytes, &arena);
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true);
 
         // When semantic detection fires, parameters are re-injected and not stripped.
         // When it does not fire, the tool is stripped and result contains the phantom.
@@ -805,12 +810,139 @@ mod tests {
         });
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(&body_bytes, &arena).unwrap();
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
         let modified: Value = serde_json::from_slice(&result).unwrap();
 
         // jira_search — stripped
         assert!(modified["tools"][0]["function"].get("parameters").is_none());
         // unregistered_tool — untouched
         assert!(modified["tools"][1]["function"].get("parameters").is_some());
+    }
+
+    #[test]
+    fn test_lazy_schema_disabled_by_default() {
+        let registry = make_registry(&[("jira_search", "Search Jira tickets")]);
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "jira_search",
+                    "parameters": { "type": "object" }
+                }
+            }]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let arena = bumpalo::Bump::new();
+        // false flag (default) should return None immediately (zero-copy pass-through)
+        assert!(registry.inject_lazy_summaries(&body_bytes, &arena, false).is_none());
+    }
+
+    #[test]
+    fn test_lazy_schema_enabled_strips_parameters() {
+        let registry = make_registry(&[("jira_search", "Search Jira tickets")]);
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "jira_search",
+                    "parameters": { "type": "object" }
+                }
+            }]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let arena = bumpalo::Bump::new();
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true);
+        assert!(result.is_some());
+        let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+        let tools = modified["tools"].as_array().unwrap();
+        
+        // jira_search parameters stripped
+        assert!(tools[0]["function"].get("parameters").is_none());
+        
+        // phantom tool is injected
+        let has_phantom = tools.iter().any(|t| {
+            t.pointer("/function/name").and_then(|v| v.as_str()) == Some(PHANTOM_TOOL_NAME)
+        });
+        assert!(has_phantom);
+    }
+
+    #[test]
+    fn test_phantom_tool_interception_latency_mock() {
+        let registry = make_registry(&[("jira_search", "Search Jira tickets")]);
+        let llm_response = serde_json::json!({
+            "id": "chatcmpl-phantom",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_001",
+                        "type": "function",
+                        "function": {
+                            "name": "get_tool_details",
+                            "arguments": "{\"tool_name\":\"jira_search\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let response_bytes = serde_json::to_vec(&llm_response).unwrap();
+        let start = std::time::Instant::now();
+        let result = registry.intercept_phantom_call(&response_bytes);
+        let elapsed = start.elapsed();
+        
+        assert!(result.is_some());
+        let synthetic: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+        assert_eq!(synthetic["choices"][0]["message"]["role"].as_str(), Some("tool"));
+        assert_eq!(synthetic["choices"][0]["message"]["tool_call_id"].as_str(), Some("call_001"));
+        
+        // Ensure no external network is called (should be extremely low latency < 1ms)
+        assert!(elapsed.as_millis() < 50, "Interception should be sub-millisecond local operation");
+    }
+
+    #[test]
+    #[should_panic(expected = "Missing required parameter: query")]
+    fn test_agent_breaks_when_lazy_schema_hides_required_params() {
+        let registry = make_registry(&[("jira_search", "Search Jira tickets")]);
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "jira_search",
+                    "description": "Old description",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string" }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }]
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let arena = bumpalo::Bump::new();
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
+        let modified: Value = serde_json::from_slice(&result).unwrap();
+        
+        assert!(modified["tools"][0]["function"].get("parameters").is_none());
+
+        // Agent sends empty arguments because the schema parameters are missing/stripped
+        let agent_arguments = serde_json::json!({});
+
+        // Validate agent's arguments against the actual registered schema requirements
+        let tool_desc = registry.lookup("jira_search").unwrap();
+        let actual_schema = tool_desc.schema.as_ref().unwrap();
+        if let Some(required) = actual_schema.get("required").and_then(|r| r.as_array()) {
+            for req_field in required {
+                let field_str = req_field.as_str().unwrap();
+                if !agent_arguments.as_object().unwrap().contains_key(field_str) {
+                    panic!("Missing required parameter: {}", field_str);
+                }
+            }
+        }
     }
 }

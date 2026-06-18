@@ -244,6 +244,7 @@ pub async fn execute_proxy(
     strategy: RoutingStrategy,
     is_free_tier: bool,
     req_extensions: &axum::http::Extensions,
+    enable_compression: bool,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
     let client_config = get_client_config(state, tenant_id).await;
@@ -628,6 +629,7 @@ pub async fn execute_proxy(
         is_free_tier,
         embedding_vector,
         client_config.semantic_cache_enabled,
+        enable_compression,
     )
     .await
 }
@@ -946,6 +948,7 @@ async fn handle_buffered_response(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    enable_compression: bool,
 ) -> Result<ProxyResult, GatewayError> {
     let mut body_bytes = upstream_response
         .bytes()
@@ -1012,10 +1015,10 @@ async fn handle_buffered_response(
 
             if !calls.is_empty() {
                 let results =
-                    crate::infrastructure::mcp_client::fan_out(calls, tenant_id, state).await;
+                    crate::infrastructure::mcp_client::fan_out(calls, tenant_id, state, enable_compression).await;
 
                 if !results.is_empty() {
-                    let tool_messages = crate::infrastructure::mcp_client::merge_results(results);
+                    let tool_messages = crate::infrastructure::mcp_client::merge_results(results, enable_compression);
 
                     // Forward merged tool results to telemetry as structured context.
                     let ctx_payload = serde_json::json!({
