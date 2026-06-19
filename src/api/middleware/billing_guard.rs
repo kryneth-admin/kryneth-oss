@@ -1,7 +1,4 @@
-//! src/api/middleware/billing_guard.rs — Balance Enforcement Pre-flight Middleware.
-//!
-//! Intercepts all billing-scoped proxy requests, checks the tenant's wallet balance
-//! in Redis asynchronously, and rejects depleted accounts with HTTP 402 Payment Required.
+// Extracts the tenant's wallet balance from OSS configuration or memory and injects it into request extensions. Final HTTP 402 rejection based on provider rates is delegated to the proxy execution stage.
 
 use crate::domain::models::AppState;
 use crate::error::GatewayError;

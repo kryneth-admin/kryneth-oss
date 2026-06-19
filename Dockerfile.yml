@@ -17,10 +17,9 @@ RUN apt-get update && \
 COPY Cargo.toml Cargo.lock ./
 
 # Create a dummy main file to build the dependencies.
-# We use the `--no-default-features` flag as requested for the OSS build.
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo build --release --no-default-features
+    cargo build --release
 
 # Now, copy the actual source code.
 COPY src ./src
@@ -30,7 +29,7 @@ COPY src ./src
 RUN touch src/main.rs
 
 # Build the final release binary using only OSS features.
-RUN cargo build --release --no-default-features
+RUN cargo build --release
 
 # ------------------------------------------------------------------------------
 # Stage 2: Runtime

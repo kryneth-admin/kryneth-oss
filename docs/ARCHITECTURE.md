@@ -126,24 +126,20 @@ src/
 │
 ├── infrastructure/      # External integrations
 │   ├── routing_strategy.rs # Provider routing
-│   ├── cache_client.rs     # L1 cache operations
+│   ├── l1_cache.rs         # L1 cache operations
 │   ├── llm_router.rs       # Provider routing logic
 │   ├── mcp_client.rs       # MCP client integration
 │   ├── mcp_registry.rs     # MCP server registry
-│   ├── enterprise_adapters.rs # Enterprise features
-│   ├── clickhouse_logger.rs   # Analytics logging
-│   ├── clickhouse_repo.rs     # Data persistence
-│   ├── redis_sync.rs         # Enterprise Redis
-│   └── schema_mapper.rs       # Format translation
+│   ├── oss_adapters.rs     # In-memory/OSS default port adapters
+│   ├── translators.rs      # Format translators
+│   └── schema_mapper.rs    # Format translation helper
 │
 └── usecases/            # Orchestration
     ├── proxy.rs         # Request proxy logic
     ├── tool_router.rs   # Tool call routing
-    ├── billing_engine.rs # Billing calculations
     ├── agentic_orchestrator.rs # Agent control flow
     ├── agentic_tracker.rs      # Session tracking
-    ├── behavior_guard.rs       # Safety enforcement
-    └── metrics_usecase.rs      # Metrics collection
+    └── behavior_guard.rs       # Safety enforcement
 ```
 
 ## Data Flow
@@ -207,17 +203,11 @@ src/
 
 ## State Management
 
-### OSS Edition
+### State Management
 - **L1 Cache:** Moka (in-memory, lock-free)
 - **Concurrent Map:** DashMap (sharded hash map)
 - **Data:** Session state, tool signatures, rate limits
 - **TTL:** Configurable, default 60s for loops
-
-### Enterprise Edition
-- **L1 Cache:** Same as OSS
-- **L2 Store:** Centralized Redis cluster
-- **Data:** Same + billing aggregates, compliance logs
-- **Consistency:** Eventually consistent across nodes
 
 ## Configuration Sources
 
@@ -237,5 +227,4 @@ src/
 ## Deployment Targets
 - Local development (cargo run)
 - Docker containers
-- Kubernetes (Enterprise)
 - Serverless (AWS Lambda, Azure Functions)

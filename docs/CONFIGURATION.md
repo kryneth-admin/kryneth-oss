@@ -49,22 +49,6 @@ MAX_IDENTICAL_TOOL_CALLS=5
 # 6. Agent calls get_weather(location="NYC") - Count: 6 → BLOCKED (exceeds limit)
 ```
 
-### Enterprise Features
-```bash
-# Enable enterprise capabilities (Redis, billing, compliance)
-ENABLE_ENTERPRISE=false
-
-# Redis connection string (for enterprise clustering)
-REDIS_URL=redis://localhost:6379
-
-# ClickHouse logging endpoint (for enterprise observability)
-CLICKHOUSE_URL=http://localhost:8123
-
-# Billing configuration
-BILLING_ENABLED=false
-BILLING_API_URL=https://billing.example.com
-```
-
 ### Performance Tuning
 ```bash
 # Tokio worker threads (defaults to CPU count)
@@ -223,34 +207,6 @@ Kryneth-Gateway-OSS/
 | `base_url` | String | Yes | Provider API base URL |
 | `target_model` | String | Yes | Model name at the target provider |
 | `schema_format` | String | Yes | Response format: openai, anthropic, gemini, cohere |
-
-## Feature Flags
-
-### OSS Build (Minimal)
-```bash
-cargo build --release --no-default-features
-```
-
-**Includes:**
-- Core routing engine
-- Tool extraction
-- Loop detection
-- Tool storm guard
-- In-memory cache (Moka + DashMap)
-
-**Size:** ~35MB Docker image
-
-### Full Build (All Features)
-```bash
-cargo build --release
-```
-
-**Adds to OSS:**
-- Enterprise mode support
-- Redis integration
-- ClickHouse logging
-- Compliance features
-- Observability tools
 
 ## Configuration Precedence
 

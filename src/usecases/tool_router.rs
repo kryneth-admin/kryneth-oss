@@ -170,6 +170,25 @@ const SCHEMA_REQUEST_PHRASES: &[&str] = &[
     "tool definition for",
 ];
 
+fn strip_non_essential_metadata(val: &mut Value) {
+    match val {
+        Value::Object(obj) => {
+            obj.remove("description");
+            obj.remove("title");
+            obj.remove("examples");
+            for v in obj.values_mut() {
+                strip_non_essential_metadata(v);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                strip_non_essential_metadata(v);
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── impl ──────────────────────────────────────────────────────────────────────
 
 impl ToolRegistry {
@@ -360,6 +379,27 @@ impl ToolRegistry {
     /// ## Fail-Open
     /// Any parse or serialisation error returns `None` — the original bytes
     /// are forwarded and no schemas are stripped.
+
+    /// Strips `parameters` schemas from registered MCP tools in the outbound
+    /// `tools` array and injects 1-line semantic summaries.
+    ///
+    /// ## Return value
+    /// * `Some(bytes)` — the modified request body, serialised into an
+    ///   arena-backed buffer then returned as an owned `Vec<u8>`.
+    /// * `None` — no registered tools were found, or parsing failed.
+    ///   The caller should forward the original `body_bytes` unchanged.
+    ///
+    /// ## Memory behaviour
+    /// * The `serde_json::Value` tree is created only for the mutation pass;
+    ///   it is dropped before the function returns.
+    /// * The serialised output bytes are written via [`BumpWriter`] directly
+    ///   into the bumpalo `arena`; the final `Vec<u8>` is a single O(n) copy
+    ///   from arena memory into owned heap memory.  All intermediate arena
+    ///   allocations are freed in O(1) when the caller drops `arena`.
+    ///
+    /// ## Fail-Open
+    /// Any parse or serialisation error returns `None` — the original bytes
+    /// are forwarded and no schemas are stripped.
     pub fn inject_lazy_summaries(
         &self,
         body_bytes: &[u8],
@@ -428,8 +468,13 @@ impl ToolRegistry {
 
             // Default path: strip parameters and inject 1-line summary.
             if let Some(func_obj) = tool.get_mut("function").and_then(|f| f.as_object_mut()) {
-                // Remove the heavy parameters schema block.
-                let had_schema = func_obj.remove("parameters").is_some();
+                // Apply safe AST stripping in-place to parameters if present
+                let had_schema = if let Some(params) = func_obj.get_mut("parameters") {
+                    strip_non_essential_metadata(params);
+                    true
+                } else {
+                    false
+                };
 
                 // Build the 1-line summary string.
                 // bumpalo::format! allocates the formatted string in the arena —
@@ -612,10 +657,10 @@ mod tests {
         let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
         let func = &modified["tools"][0]["function"];
 
-        // Schema removed
+        // Under SAFE compression, parameters is kept.
         assert!(
-            func.get("parameters").is_none(),
-            "parameters schema should be stripped"
+            func.get("parameters").is_some(),
+            "parameters schema should be preserved under safe compression"
         );
         // 1-line summary injected
         let desc = func["description"].as_str().unwrap();
@@ -813,8 +858,8 @@ mod tests {
         let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
         let modified: Value = serde_json::from_slice(&result).unwrap();
 
-        // jira_search — stripped
-        assert!(modified["tools"][0]["function"].get("parameters").is_none());
+        // jira_search — parameters kept under SAFE compression
+        assert!(modified["tools"][0]["function"].get("parameters").is_some());
         // unregistered_tool — untouched
         assert!(modified["tools"][1]["function"].get("parameters").is_some());
     }
@@ -858,8 +903,8 @@ mod tests {
         let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
         let tools = modified["tools"].as_array().unwrap();
         
-        // jira_search parameters stripped
-        assert!(tools[0]["function"].get("parameters").is_none());
+        // jira_search parameters kept under SAFE compression
+        assert!(tools[0]["function"].get("parameters").is_some());
         
         // phantom tool is injected
         let has_phantom = tools.iter().any(|t| {
@@ -928,7 +973,8 @@ mod tests {
         let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
         let modified: Value = serde_json::from_slice(&result).unwrap();
         
-        assert!(modified["tools"][0]["function"].get("parameters").is_none());
+        // Under SAFE compression, parameters is kept.
+        assert!(modified["tools"][0]["function"].get("parameters").is_some());
 
         // Agent sends empty arguments because the schema parameters are missing/stripped
         let agent_arguments = serde_json::json!({});
@@ -944,5 +990,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_safe_compression_preserves_structure() {
+        let registry = make_registry(&[("jira_search", "Search Jira tickets")]);
+        let body = serde_json::json!({
+            "model": "gpt-4",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "jira_search",
+                    "description": "Outer tool description",
+                    "parameters": {
+                        "type": "object",
+                        "title": "Jira Search Schema",
+                        "description": "Inner description for parameters",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "title": "Query term",
+                                "description": "Search query description",
+                                "examples": ["bug", "ticket"]
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Project identifier",
+                                "enum": ["INFRA", "QA", "DEV"]
+                            }
+                        },
+                        "required": ["query"],
+                        "examples": [{"query": "bug"}]
+                    }
+                }
+            }]
+        });
+
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let arena = bumpalo::Bump::new();
+        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true);
+        assert!(result.is_some());
+        
+        let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
+        let func = &modified["tools"][0]["function"];
+        let params = func.get("parameters").unwrap();
+
+        // ASSERT that all description, title, and examples fields are removed or None
+        assert!(params.get("description").is_none());
+        assert!(params.get("title").is_none());
+        assert!(params.get("examples").is_none());
+        
+        let query_prop = params.pointer("/properties/query").unwrap();
+        assert!(query_prop.get("description").is_none());
+        assert!(query_prop.get("title").is_none());
+        assert!(query_prop.get("examples").is_none());
+
+        let project_prop = params.pointer("/properties/project").unwrap();
+        assert!(project_prop.get("description").is_none());
+
+        // ASSERT that type, properties, required, and enum constraints are preserved unchanged
+        assert_eq!(params["type"].as_str(), Some("object"));
+        assert_eq!(query_prop["type"].as_str(), Some("string"));
+        assert_eq!(project_prop["type"].as_str(), Some("string"));
+        assert_eq!(params["required"].as_array().unwrap()[0].as_str(), Some("query"));
+        assert_eq!(
+            project_prop["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<&str>>(),
+            vec!["INFRA", "QA", "DEV"]
+        );
     }
 }

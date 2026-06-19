@@ -150,6 +150,10 @@ pub async fn rate_limit_middleware(
         return Ok(response);
     }
 
+    if capacity_rpm == 0 {
+        return Ok(next.run(request).await);
+    }
+
     let consumed = bucket
         .consumed
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

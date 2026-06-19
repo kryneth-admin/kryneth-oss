@@ -19,32 +19,32 @@ cd Kryneth-Gateway-OSS
 export JWT_SECRET="dummy-secret-for-local-dev"
 ```
 
-Please note that Kryneth uses **conditional compilation feature flags** to separate core open-source components from the enterprise clustering stack.
+This open-source repository uses strictly in-memory adapters (`OssAuth`, `OssRateLimit`) to guarantee frictionless local development without external database dependencies.
 
 ---
 
 ## 🛡️ Pre-Submission Verification (Mandatory)
 
-Because this is the core open-source distribution of Kryneth Gateway, **any submission that fails compilation under the default OSS feature configuration will be blocked.**
+Because this is the core open-source distribution of Kryneth Gateway, **any submission that fails compilation will be blocked.**
 
 Before pushing your changes, run the following validation suite locally:
 
 ### 1. Verification of the OSS Build
-Verify that the package builds successfully without enterprise features:
+Verify that the package builds successfully:
 ```bash
-cargo check --no-default-features
+cargo check
 ```
 
 ### 2. Run the OSS Test Suite
 Run local tests to ensure no regressions are introduced:
 ```bash
-cargo test --no-default-features
+cargo test
 ```
 
 ### 3. Run Clippy (Linter)
 All code must pass clippy checks with no warnings:
 ```bash
-cargo clippy --no-default-features -- -D warnings
+cargo clippy -- -D warnings
 ```
 
 ### 4. Zero-Copy Constraints

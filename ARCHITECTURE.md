@@ -8,12 +8,7 @@ Kryneth is a blazingly fast, ultra-low latency Rust service built with Axum. It 
 The codebase strictly adheres to the **Ports & Adapters** (Hexagonal Architecture) pattern. Core domain logic and use cases (e.g., `behavior_guard`, `tool_router`) rely entirely on abstract traits ("Ports").
 Concrete implementations ("Adapters") are injected at runtime, enabling Kryneth to operate in two distinct modes via an Open-Core strategy.
 
-## Open-Core Strategy
-
-We use compile-time feature flags (`#[cfg(feature = "enterprise")]`) to conditionally compile different adapter implementations while keeping the core routing engine untouched.
-
-- **OSS Edition**: Runs purely in-process for zero-dependency deployments. It uses `OssRateLimit` and `OssAuth` adapters which rely on local memory mechanisms like `DashMap` and `moka`.
-- **Enterprise Edition**: Seamlessly swaps the adapters to distributed state management (e.g., Redis for rate limiting, PostgreSQL for auth/billing, ClickHouse for telemetry) for multi-node Kubernetes deployments.
+This open-source repository uses strictly in-memory adapters (`OssAuth`, `OssRateLimit`) to guarantee frictionless local development without external database dependencies.
 
 ## High-Level Design
 

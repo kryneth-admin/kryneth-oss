@@ -32,10 +32,10 @@ jobs:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Cargo Check
-      run: cargo check --no-default-features
+      run: cargo check
 
     - name: Cargo Test
-      run: cargo test --no-default-features
+      run: cargo test
 
     - name: Cargo Clippy
-      run: cargo clippy --no-default-features -- -D warnings
+      run: cargo clippy -- -D warnings
