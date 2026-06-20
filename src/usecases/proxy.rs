@@ -233,7 +233,6 @@ async fn get_client_config(state: &Arc<AppState>, tenant_id: &str) -> ClientConf
         semantic_cache_threshold: 0.85,
     }
 }
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_proxy(
     state: &Arc<AppState>,
     body_bytes: &axum::body::Bytes,
@@ -247,6 +246,129 @@ pub async fn execute_proxy(
     enable_compression: bool,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
+
+    // High-load Content Bypass:
+    // If request payload is > 5MB, bypass PII checking, compliance, loop checks, and cache lookup,
+    // and stream directly to upstream targets.
+    if body_bytes.len() > 5 * 1024 * 1024 {
+        let prep = crate::infrastructure::llm_router::prep_upstream_request(
+            state,
+            tenant_id,
+            body_bytes,
+            accept_header,
+            strategy,
+        ).await?;
+
+        struct RequestExtensions<'a>(&'a axum::http::Extensions);
+        impl<'a> RequestExtensions<'a> {
+            fn extensions(&self) -> &axum::http::Extensions {
+                self.0
+            }
+        }
+        let req = RequestExtensions(req_extensions);
+
+        let current_balance = match req.extensions().get::<f64>() {
+            Some(b) => *b,
+            None => {
+                return Err(crate::error::GatewayError::InternalError(
+                    "Billing context missing from request extensions".to_string(),
+                ))
+            }
+        };
+
+        let provider_name = prep.primary_target.provider_name.clone();
+        let target_model = prep.primary_target.target_model.clone();
+        let target_rate =
+            crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model);
+
+        if !is_free_tier && target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
+            return Err(crate::error::GatewayError::InsufficientFunds);
+        }
+
+        let (upstream_response, success_key_alias, is_hot_swapped, prep) =
+            crate::infrastructure::llm_router::execute_upstream_request(
+                state,
+                prep,
+                body_bytes,
+            )
+            .await?;
+
+        let requested_provider = provider_name.clone();
+        let executed_provider = requested_provider.clone();
+
+        let upstream_status = upstream_response.status().as_u16();
+        let content_type = upstream_response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("application/json")
+            .to_string();
+
+        let raw_prompt = std::str::from_utf8(body_bytes)
+            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+
+        // Fast check for stream without deserialization
+        let is_streaming = {
+            let scan_limit = body_bytes.len().min(8192);
+            let slice = &body_bytes[..scan_limit];
+            if let Some(pos) = slice.windows(8).position(|w| w == b"\"stream\"") {
+                let after_key = &slice[pos + 8..];
+                let mut i = 0;
+                while i < after_key.len() && (after_key[i].is_ascii_whitespace() || after_key[i] == b':') {
+                    i += 1;
+                }
+                i < after_key.len() && after_key[i..].starts_with(b"true")
+            } else {
+                false
+            }
+        };
+
+        if is_streaming {
+            return handle_streaming_response(
+                state,
+                upstream_response,
+                upstream_status,
+                content_type,
+                tenant_id,
+                model_name,
+                raw_prompt,
+                "", // semantic_text
+                trace_ctx,
+                start_time,
+                requested_provider,
+                executed_provider,
+                is_hot_swapped,
+                success_key_alias,
+                prep,
+                body_bytes.clone(),
+                is_free_tier,
+                None, // embedding
+                false, // cache_enabled
+            );
+        } else {
+            return handle_buffered_response(
+                state,
+                upstream_response,
+                upstream_status,
+                content_type,
+                tenant_id,
+                model_name,
+                raw_prompt,
+                "",
+                trace_ctx,
+                start_time,
+                requested_provider,
+                executed_provider,
+                is_hot_swapped,
+                success_key_alias,
+                is_free_tier,
+                None,
+                false,
+                enable_compression,
+            ).await;
+        }
+    }
+
     let client_config = get_client_config(state, tenant_id).await;
 
     crate::usecases::behavior_guard::enforce_oss_agent_guardian(
@@ -375,11 +497,10 @@ pub async fn execute_proxy(
         }
     };
 
-    let mut prep_body_bytes = body_bytes.to_vec();
     let prep_future = llm_router::prep_upstream_request(
         state,
         tenant_id,
-        &mut prep_body_bytes,
+        &body_bytes,
         accept_header,
         strategy,
     );
@@ -760,8 +881,14 @@ fn handle_cache_hit(
     }
 }
 
-/// Handles SSE streaming: zero-copy stream proxy, fires telemetry on completion.
-#[allow(clippy::too_many_arguments)]
+fn has_error_signature(chunk: &[u8]) -> bool {
+    // Allocation-free sliding window scanner for error signatures
+    chunk.windows(7).any(|w| w == b"\"error\"")
+        || chunk.windows(12).any(|w| w == b"\"rate_limit\"")
+        || chunk.windows(20).any(|w| w == b"\"insufficient_funds\"")
+        || chunk.windows(15).any(|w| w == b"\"billing_limit\"")
+}
+
 fn handle_streaming_response(
     state: &Arc<AppState>,
     upstream_response: reqwest::Response,
@@ -777,19 +904,32 @@ fn handle_streaming_response(
     executed_provider: String,
     is_hot_swapped: u8,
     success_key_alias: String,
-    _prep: crate::infrastructure::llm_router::PreparedUpstreamRequest,
-    _body_bytes: axum::body::Bytes,
+    prep: crate::infrastructure::llm_router::PreparedUpstreamRequest,
+    body_bytes: axum::body::Bytes,
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
 ) -> Result<ProxyResult, GatewayError> {
-    let state_c = state.clone();
+    let state_stream = state.clone();
+    let state_telemetry = state.clone();
     let tenant_id_c = tenant_id.to_string();
     let model_name_c = model_name.to_string();
     let raw_prompt_c = raw_prompt.to_string();
     let semantic_text_c = semantic_text.to_string();
     let trace_ctx_c = trace_ctx.clone();
     let embedding_vector_c = embedding_vector.clone();
+    let body_bytes_stream = body_bytes.clone();
+    let requested_provider_c = requested_provider.clone();
+
+    let shared_executed_provider = std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
+    let shared_success_key_alias = std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
+    let shared_is_hot_swapped = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(is_hot_swapped));
+
+    let shared_executed_provider_c = shared_executed_provider.clone();
+    let shared_success_key_alias_c = shared_success_key_alias.clone();
+    let shared_is_hot_swapped_c = shared_is_hot_swapped.clone();
+
+    let mut prep = prep;
 
     use futures::StreamExt; // Put at top of function so both spawns can use it
 
@@ -799,38 +939,117 @@ fn handle_streaming_response(
         tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(1024);
 
     tokio::spawn(async move {
-        let mut stream = upstream_response.bytes_stream();
+        let mut active_stream = upstream_response.bytes_stream();
+        let mut current_provider = executed_provider;
 
-        while let Some(chunk_res) = stream.next().await {
-            match chunk_res {
-                Ok(chunk) => {
-                    let _ = telemetry_tx.try_send(chunk.clone());
-                    if client_tx.send(Ok(chunk)).await.is_err() {
-                        return; // Client disconnected
+        loop {
+            let mut failed = false;
+
+            while let Some(chunk_res) = active_stream.next().await {
+                match chunk_res {
+                    Ok(chunk) => {
+                        // Check for error signatures
+                        if has_error_signature(&chunk) {
+                            tracing::warn!("Detected error signature in streaming chunk from provider {}", current_provider);
+                            failed = true;
+                            break;
+                        }
+
+                        let _ = telemetry_tx.try_send(chunk.clone());
+                        if client_tx.send(Ok(chunk)).await.is_err() {
+                            return; // Client disconnected
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Mid-stream connection error from provider {}: {}", current_provider, e);
+                        failed = true;
+                        break;
                     }
                 }
-                Err(e) => {
-                    tracing::error!("Mid-stream connection error from upstream: {}", e);
-                    // Send an explicit mid-stream SSE error event to the client so they know it failed, then terminate cleanly
-                    let err_json = serde_json::json!({
-                        "error": {
-                            "message": "Upstream stream interrupted mid-way.",
-                            "type": "stream_interrupted",
-                            "code": "mid_stream_failure"
+            }
+
+            if !failed {
+                // Stream finished successfully!
+                break;
+            }
+
+            // If we reached here, the active stream failed. Try fallbacks!
+            let mut fallback_succeeded = false;
+            while let Some(target) = prep.fallback_targets.first().cloned() {
+                prep.fallback_targets.remove(0); // Consume this fallback
+                
+                tracing::info!(
+                    model = %prep.model,
+                    key_alias = %target.api_key_alias,
+                    "Streaming failover: attempting fallback upstream request"
+                );
+
+                let provider_id = target.schema_format.as_str();
+                let config = crate::infrastructure::llm_router::get_provider_config(provider_id);
+
+                let fallback_req = match crate::infrastructure::llm_router::build_provider_request(
+                    &state_stream.http_client,
+                    &config,
+                    &target.base_url,
+                    &target.api_key,
+                    &prep.model,
+                    &target.target_model,
+                    &body_bytes_stream,
+                    &prep.accept_header,
+                ) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        tracing::error!("Failed to build fallback request for stitching: {}", e);
+                        continue;
+                    }
+                };
+
+                match fallback_req.send().await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            active_stream = resp.bytes_stream();
+                            current_provider = config.id.clone();
+                            
+                            // Update shared state for telemetry safely
+                            if let Ok(mut p_guard) = shared_executed_provider.lock() {
+                                *p_guard = config.id.clone();
+                            }
+                            if let Ok(mut k_guard) = shared_success_key_alias.lock() {
+                                *k_guard = target.api_key_alias.clone();
+                            }
+                            shared_is_hot_swapped.store(1, std::sync::atomic::Ordering::Relaxed);
+                            
+                            fallback_succeeded = true;
+                            tracing::info!("Streaming failover: stitched fallback stream successfully");
+                            break;
+                        } else {
+                            tracing::warn!("Streaming failover: fallback provider returned non-success status: {}", resp.status());
                         }
-                    });
-                    let err_msg = format!("data: {}\n\n", err_json);
-                    let _ = client_tx.send(Ok(bytes::Bytes::from(err_msg))).await;
-                    break;
+                    }
+                    Err(e) => {
+                        tracing::error!("Streaming failover: fallback provider unreachable: {}", e);
+                    }
                 }
+            }
+
+            if !fallback_succeeded {
+                // All fallbacks exhausted or failed. Send a final SSE error representation and close.
+                let err_json = serde_json::json!({
+                    "error": {
+                        "message": "Stream interrupted and all fallbacks exhausted.",
+                        "type": "stream_interrupted",
+                        "code": "mid_stream_failure"
+                    }
+                });
+                let err_msg = format!("data: {}\n\n", err_json);
+                let _ = client_tx.send(Ok(bytes::Bytes::from(err_msg))).await;
+                break;
             }
         }
     });
 
     let body_stream =
         axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(client_rx));
-
-    let success_key_alias_c = success_key_alias.clone();
 
     // Spawn a lightweight task to parse tokens and record telemetry.
     // Uses ReceiverStream (bounded) instead of UnboundedReceiverStream.
@@ -896,8 +1115,16 @@ fn handle_streaming_response(
             Some(response_text.into_bytes())
         };
 
+        let final_executed_provider = shared_executed_provider_c
+            .lock()
+            .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
+        let final_success_key_alias = shared_success_key_alias_c
+            .lock()
+            .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
+        let final_is_hot_swapped = shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
+
         fire_async_telemetry(
-            &state_c,
+            &state_telemetry,
             &tenant_id_c,
             &model_name_c,
             &raw_prompt_c,
@@ -908,10 +1135,10 @@ fn handle_streaming_response(
             total_tokens,
             false,
             response_bytes,
-            requested_provider,
-            executed_provider,
-            is_hot_swapped,
-            success_key_alias_c,
+            requested_provider_c,
+            final_executed_provider,
+            final_is_hot_swapped,
+            final_success_key_alias,
             is_free_tier,
             embedding_vector_c,
             semantic_cache_enabled,
@@ -1690,5 +1917,248 @@ mod tests {
         assert!(decode_res.is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_has_error_signature_matches() {
+        assert!(has_error_signature(b"some prefix {\"error\": \"message\"}"));
+        assert!(has_error_signature(b"\"rate_limit\" exceeded"));
+        assert!(has_error_signature(b"\"insufficient_funds\" in balance"));
+        assert!(has_error_signature(b"\"billing_limit\" reached"));
+        assert!(!has_error_signature(b"this is a safe message with no issues"));
+    }
+
+    #[allow(clippy::uninit_assumed_init, invalid_value, unknown_lints)]
+    async fn setup_proxy_test_state() -> (Arc<AppState>, wiremock::MockServer) {
+        let mock_server = wiremock::MockServer::start().await;
+
+        let circuit_breaker = moka::future::Cache::builder()
+            .max_capacity(100)
+            .time_to_live(std::time::Duration::from_secs(60))
+            .build();
+
+        let loop_fallback_cache = moka::future::Cache::builder().max_capacity(100).build();
+        let agent_guardian_cache = moka::future::Cache::builder().max_capacity(100).build();
+
+        let routing_state = Arc::new(crate::domain::models::RoutingState::new());
+        let l1_cache = Arc::new(crate::infrastructure::l1_cache::L1Cache::new(1024).unwrap());
+        let http_client = reqwest::Client::new();
+
+        let state = AppState {
+            http_client,
+            compliance_url: String::new(),
+            rate_limit_max: 0,
+            rate_limit_window: 0,
+            dashboard_url: String::new(),
+            llm_api_base_url: Some(mock_server.uri()),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
+            auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
+            rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
+            routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
+            semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            rate_limit_cache: Arc::new(dashmap::DashMap::new()),
+            l1_cache,
+            routing_state,
+            circuit_breaker,
+            loop_fallback_cache,
+            mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
+            tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
+            agent_guardian_cache,
+            dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+        };
+
+        (Arc::new(state), mock_server)
+    }
+
+    #[tokio::test]
+    async fn test_streaming_failover_stitching_end_to_end() {
+        let (state, mock_server) = setup_proxy_test_state().await;
+
+        let tenant_id = "test-tenant";
+        let virtual_model_name = "test-model";
+
+        let mut tenant_map = std::collections::HashMap::new();
+        tenant_map.insert(
+            virtual_model_name.to_string(),
+            crate::domain::models::ModelConfig {
+                targets: vec![
+                    crate::domain::models::UpstreamTarget {
+                        priority: 1,
+                        weight: 1,
+                        api_key_alias: "primary".into(),
+                        api_key: "sk-primary".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: mock_server.uri(),
+                        target_model: "gpt-4".into(),
+                        schema_format: "openai".into(),
+                    },
+                    crate::domain::models::UpstreamTarget {
+                        priority: 2,
+                        weight: 1,
+                        api_key_alias: "fallback".into(),
+                        api_key: "sk-fallback".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: mock_server.uri(),
+                        target_model: "gpt-4".into(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = std::collections::HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        // Primary path returns a chunk then an error signature chunk
+        let primary_body = "data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\ndata: {\"error\": \"rate_limit\"}\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(wiremock::matchers::header("Authorization", "Bearer sk-primary"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(primary_body))
+            .mount(&mock_server)
+            .await;
+
+        // Fallback path returns success
+        let fallback_body = "data: {\"choices\": [{\"delta\": {\"content\": \" stitched world\"}}]}\n\ndata: [DONE]\n\n";
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(wiremock::matchers::header("Authorization", "Bearer sk-fallback"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(fallback_body))
+            .mount(&mock_server)
+            .await;
+
+        let body = axum::body::Bytes::from(serde_json::json!({
+            "model": "test-model",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        }).to_string());
+
+        let mut req_extensions = axum::http::Extensions::new();
+        req_extensions.insert(100.0f64);
+
+        let trace_ctx = TraceContext {
+            trace_id: "t1".to_string(),
+            session_id: "s1".to_string(),
+            parent_trace_id: None,
+        };
+
+        let result = execute_proxy(
+            &state,
+            &body,
+            tenant_id,
+            "test-model",
+            "*/*",
+            &trace_ctx,
+            RoutingStrategy::Default,
+            false,
+            &req_extensions,
+            false,
+        ).await.unwrap();
+
+        let ProxyBody::Stream(body_stream) = result.body else {
+            panic!("Expected streaming response body");
+        };
+
+        use futures::StreamExt;
+        let mut body_bytes = Vec::new();
+        let mut stream = body_stream.into_data_stream();
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res.unwrap();
+            body_bytes.extend_from_slice(&chunk);
+        }
+
+        let output_str = String::from_utf8(body_bytes).unwrap();
+        assert!(output_str.contains(" stitched world"), "Output does not contain ' stitched world': {}", output_str);
+        assert!(!output_str.contains("rate_limit"), "Output incorrectly contains 'rate_limit': {}", output_str);
+    }
+
+    #[tokio::test]
+    async fn test_high_load_bypass_large_payload() {
+        let (state, mock_server) = setup_proxy_test_state().await;
+
+        let tenant_id = "test-tenant";
+        let virtual_model_name = "test-model";
+
+        let mut tenant_map = std::collections::HashMap::new();
+        tenant_map.insert(
+            virtual_model_name.to_string(),
+            crate::domain::models::ModelConfig {
+                targets: vec![
+                    crate::domain::models::UpstreamTarget {
+                        priority: 1,
+                        weight: 1,
+                        api_key_alias: "primary".into(),
+                        api_key: "sk-primary".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: mock_server.uri(),
+                        target_model: "gpt-4".into(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = std::collections::HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        // Mock upstream response
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "Bypassed successfully"}}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Generate a large payload > 5MB that contains PII email pattern
+        let pii_email = "test-email-address@domain.com";
+        let padding_size = 5 * 1024 * 1024 + 100; // > 5MB
+        let mut large_string = String::with_capacity(padding_size);
+        large_string.push_str(pii_email);
+        while large_string.len() < padding_size {
+            large_string.push_str(" padding content");
+        }
+
+        let body = axum::body::Bytes::from(format!(
+            r#"{{"model": "test-model", "messages": [{{"role": "user", "content": "{}"}}]}}"#,
+            large_string
+        ));
+
+        let mut req_extensions = axum::http::Extensions::new();
+        req_extensions.insert(100.0f64);
+
+        let trace_ctx = TraceContext {
+            trace_id: "t2".to_string(),
+            session_id: "s2".to_string(),
+            parent_trace_id: None,
+        };
+
+        // If high-load bypass is NOT working, this call will fail because compliance service is not mocked.
+        // If it is working, it bypasses PII/compliance check, prep requests, and returns success!
+        let result = execute_proxy(
+            &state,
+            &body,
+            tenant_id,
+            "test-model",
+            "*/*",
+            &trace_ctx,
+            RoutingStrategy::Default,
+            false,
+            &req_extensions,
+            false,
+        ).await;
+
+        assert!(result.is_ok(), "High-load bypass did not skip PII check! Error: {:?}", result.err());
+        let proxy_res = result.unwrap();
+        assert_eq!(proxy_res.status, 200);
     }
 }

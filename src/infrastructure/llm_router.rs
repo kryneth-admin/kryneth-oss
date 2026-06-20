@@ -84,14 +84,40 @@ pub struct PreparedUpstreamRequest {
     pub accept_header: String,
 }
 
-pub async fn prep_upstream_request(
-    state: &Arc<AppState>,
-    tenant_id: &str,
-    body_bytes: &mut [u8],
-    accept_header: &str,
-    _strategy: RoutingStrategy,
-) -> Result<PreparedUpstreamRequest, GatewayError> {
-    // 1. Extract the model from the incoming request
+pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
+    // Scan first 8KB or so
+    let scan_limit = body_bytes.len().min(8192);
+    let slice = &body_bytes[..scan_limit];
+    if let Some(pos) = slice.windows(7).position(|w| w == b"\"model\"") {
+        let after_key = &slice[pos + 7..];
+        let mut i = 0;
+        while i < after_key.len() && (after_key[i].is_ascii_whitespace() || after_key[i] == b':') {
+            i += 1;
+        }
+        if i < after_key.len() && after_key[i] == b'"' {
+            i += 1;
+            let start = i;
+            while i < after_key.len() && after_key[i] != b'"' {
+                if after_key[i] == b'\\' {
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if i < after_key.len() {
+                let model_str = std::str::from_utf8(&after_key[start..i])
+                    .map_err(|_| GatewayError::InvalidJSON("Invalid UTF-8 in model name".to_string()))?;
+                return Ok(model_str.trim().to_string());
+            }
+        }
+    }
+    
+    if body_bytes.len() > 5 * 1024 * 1024 {
+        // High load pass-through: if > 5MB and model key not found in prefix, return error
+        return Err(GatewayError::MissingModel);
+    }
+    
+    // Fallback for smaller cases
     #[derive(serde::Deserialize)]
     struct ExtractModel<'a> {
         #[serde(borrow)]
@@ -105,6 +131,18 @@ pub async fn prep_upstream_request(
         .ok_or(GatewayError::MissingModel)?
         .trim()
         .to_string();
+    Ok(model_owned)
+}
+
+pub async fn prep_upstream_request(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    body_bytes: &axum::body::Bytes,
+    accept_header: &str,
+    _strategy: RoutingStrategy,
+) -> Result<PreparedUpstreamRequest, GatewayError> {
+    // 1. Extract the model from the incoming request using the fast-path scanner
+    let model_owned = extract_model_fast(body_bytes)?;
     let model = model_owned.as_str();
 
     // 2. Load the lock-free state
@@ -257,7 +295,6 @@ pub async fn execute_upstream_request(
         let provider_id = target.schema_format.as_str();
         let config = get_provider_config(provider_id);
 
-        let mut fallback_body = body_bytes.to_vec();
         let fallback_req = build_provider_request(
             &state.http_client,
             &config,
@@ -265,7 +302,7 @@ pub async fn execute_upstream_request(
             &target.api_key,
             &prep.model,
             &target.target_model,
-            &mut fallback_body,
+            body_bytes,
             &prep.accept_header,
         )?;
 
@@ -315,9 +352,8 @@ pub async fn route_chat_completion_with_fallback(
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let mut mutable_body = body_bytes.to_vec();
     let prep =
-        prep_upstream_request(state, tenant_id, &mut mutable_body, accept_header, strategy).await?;
+        prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
@@ -330,7 +366,7 @@ pub fn build_provider_request(
     api_key: &str,
     model: &str,
     upstream_target_model: &str,
-    body_bytes: &mut [u8],
+    body_bytes: &axum::body::Bytes,
     accept_header: &str,
 ) -> Result<reqwest::RequestBuilder, GatewayError> {
     let endpoint = if config.schema_format == SchemaFormat::Anthropic {
@@ -377,7 +413,11 @@ pub fn build_provider_request(
     };
 
     // 3. Conditional Translation (Zero-Copy proxy for OpenAI schemas)
-    let request = if config.schema_format != SchemaFormat::OpenAI {
+    // If request payload > 5MB, bypass payload rewriting or translation entirely,
+    // and build the request directly using body_bytes.clone().
+    let request = if body_bytes.len() > 5 * 1024 * 1024 {
+        request.body(body_bytes.clone())
+    } else if config.schema_format != SchemaFormat::OpenAI {
         use crate::infrastructure::translators::BaseTranslator;
         let source_translator = crate::infrastructure::translators::OpenAiTranslator;
 
@@ -721,11 +761,10 @@ mod tests {
             .to_string(),
         );
 
-        let mut body_bytes = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &mut body_bytes,
+            &body,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -800,11 +839,10 @@ mod tests {
             r#"{"model": "  clean-route  ", "messages": [{"role": "user", "content": "hi"}]}"#,
         );
 
-        let mut body_bytes = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &mut body_bytes,
+            &body,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -866,11 +904,10 @@ mod tests {
 
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
-        let mut body_bytes = body.to_vec();
         let prep = prep_upstream_request(
             &state,
             "t1",
-            &mut body_bytes,
+            &body,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -920,13 +957,12 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // 3. Execute
+        // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
-        let mut body_bytes = body.to_vec();
         let prep = prep_upstream_request(
             &state,
             "t1",
-            &mut body_bytes,
+            &body,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -970,7 +1006,7 @@ mod tests {
         };
 
         // Case 1: Stream
-        let mut stream_body = r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#.as_bytes().to_vec();
+        let stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#);
         let builder_stream = build_provider_request(
             &client,
             &config,
@@ -978,7 +1014,7 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &mut stream_body,
+            &stream_body,
             "*/*",
         )
         .unwrap();
@@ -989,7 +1025,7 @@ mod tests {
         );
 
         // Case 2: Non-stream
-        let mut non_stream_body = r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#.as_bytes().to_vec();
+        let non_stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#);
         let builder_non_stream = build_provider_request(
             &client,
             &config,
@@ -997,7 +1033,7 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &mut non_stream_body,
+            &non_stream_body,
             "*/*",
         )
         .unwrap();
