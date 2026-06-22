@@ -1,6 +1,6 @@
 //! infrastructure/llm_router.rs — Dynamic Multi-LLM Router with Automated Fallback
 
-use serde_json::Value;
+
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -84,7 +84,7 @@ pub struct PreparedUpstreamRequest {
     pub accept_header: String,
 }
 
-pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
+pub fn extract_model_fast(body_bytes: &mut [u8]) -> Result<String, GatewayError> {
     // Scan first 8KB or so
     let scan_limit = body_bytes.len().min(8192);
     let slice = &body_bytes[..scan_limit];
@@ -124,7 +124,7 @@ pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
         model: Option<std::borrow::Cow<'a, str>>,
     }
     let extracted: ExtractModel<'_> =
-        serde_json::from_slice(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+        simd_json::from_slice(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
     let model_owned = extracted
         .model
         .as_deref()
@@ -137,7 +137,7 @@ pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
 pub async fn prep_upstream_request(
     state: &Arc<AppState>,
     tenant_id: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
     _strategy: RoutingStrategy,
 ) -> Result<PreparedUpstreamRequest, GatewayError> {
@@ -233,7 +233,7 @@ pub async fn prep_upstream_request(
 pub async fn execute_upstream_request(
     state: &Arc<AppState>,
     mut prep: PreparedUpstreamRequest,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
 ) -> Result<(reqwest::Response, String, u8, PreparedUpstreamRequest), GatewayError> {
     info!(
         model = %prep.model,
@@ -348,7 +348,7 @@ pub async fn execute_upstream_request(
 pub async fn route_chat_completion_with_fallback(
     state: &Arc<AppState>,
     tenant_id: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
@@ -366,7 +366,7 @@ pub fn build_provider_request(
     api_key: &str,
     model: &str,
     upstream_target_model: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
 ) -> Result<reqwest::RequestBuilder, GatewayError> {
     let endpoint = if config.schema_format == SchemaFormat::Anthropic {
@@ -377,7 +377,7 @@ pub fn build_provider_request(
             stream: Option<bool>,
         }
         let extracted_stream =
-            serde_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
+            simd_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
                 GatewayError::ResponseBuild(format!("Invalid JSON body for stream check: {}", e))
             })?;
         let is_stream = extracted_stream.stream.unwrap_or(false);
@@ -416,16 +416,12 @@ pub fn build_provider_request(
     // If request payload > 5MB, bypass payload rewriting or translation entirely,
     // and build the request directly using body_bytes.clone().
     let request = if body_bytes.len() > 5 * 1024 * 1024 {
-        request.body(body_bytes.clone())
+        request.body(body_bytes.to_vec())
     } else if config.schema_format != SchemaFormat::OpenAI {
         use crate::infrastructure::translators::BaseTranslator;
         let source_translator = crate::infrastructure::translators::OpenAiTranslator;
 
-        let parsed_value: Value = serde_json::from_slice(body_bytes).map_err(|e| {
-            GatewayError::ResponseBuild(format!("Invalid JSON for translation: {}", e))
-        })?;
-
-        let mut conv = source_translator.to_universal(parsed_value).map_err(|e| {
+        let mut conv = source_translator.to_universal(body_bytes).map_err(|e| {
             GatewayError::ResponseBuild(format!("Incoming translation failed: {}", e))
         })?;
 
@@ -761,10 +757,11 @@ mod tests {
             .to_string(),
         );
 
+        let mut body_mut = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -839,10 +836,11 @@ mod tests {
             r#"{"model": "  clean-route  ", "messages": [{"role": "user", "content": "hi"}]}"#,
         );
 
+        let mut body_mut = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -904,10 +902,11 @@ mod tests {
 
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
+        let mut body_mut = body.to_vec();
         let prep = prep_upstream_request(
             &state,
             "t1",
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
         )
@@ -959,16 +958,17 @@ mod tests {
 
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
+        let mut body_mut = body.to_vec();
         let prep = prep_upstream_request(
             &state,
             "t1",
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
         )
         .await
         .unwrap();
-        let _ = execute_upstream_request(&state, prep, &body).await;
+        let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
 
         // 4. Verify: Breaker is now open for "fail-key" under tenant t1
         let is_blacklisted = state
@@ -1007,6 +1007,7 @@ mod tests {
 
         // Case 1: Stream
         let stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let mut stream_body_mut = stream_body.to_vec();
         let builder_stream = build_provider_request(
             &client,
             &config,
@@ -1014,7 +1015,7 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &stream_body,
+            &mut stream_body_mut,
             "*/*",
         )
         .unwrap();
@@ -1026,6 +1027,7 @@ mod tests {
 
         // Case 2: Non-stream
         let non_stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let mut non_stream_body_mut = non_stream_body.to_vec();
         let builder_non_stream = build_provider_request(
             &client,
             &config,
@@ -1033,7 +1035,7 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &non_stream_body,
+            &mut non_stream_body_mut,
             "*/*",
         )
         .unwrap();

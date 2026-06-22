@@ -11,6 +11,8 @@ Cargo.lock
 env.local
 env.*.local
 routing.yaml
+rustup-init.exe
+
 
 # IDE
 .vscode/

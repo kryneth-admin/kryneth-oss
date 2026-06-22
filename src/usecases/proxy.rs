@@ -14,6 +14,7 @@ use eventsource_stream::Eventsource;
 // futures::StreamExt is imported inline inside handle_streaming_response.
 use regex::Regex;
 use serde_json::{json, Value};
+use simd_json::prelude::*;
 // NOTE: ReceiverStream (bounded) is used inline in handle_streaming_response.
 use tracing::{debug, error, info, warn};
 
@@ -92,12 +93,13 @@ fn get_requested_provider(state: &Arc<AppState>, tenant_id: &str, model_name: &s
 
 /// Extracts textual content from user messages across different LLM provider schemas (OpenAI, Anthropic, Gemini),
 /// returning `None` if no clean user semantic text can be isolated to prevent vector cache pollution.
-fn extract_semantic_text(payload: &Value) -> Option<String> {
+fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<String> {
     let mut semantic_text = String::new();
 
     // 1. OpenAI & Anthropic Messages format
-    if let Some(messages) = payload.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages.iter().rev() {
+    if let Some(simd_json::BorrowedValue::Array(messages)) = payload.get("messages") {
+        for i in (0..messages.len()).rev() {
+            let msg = &messages[i];
             if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
                 if let Some(content) = msg.get("content") {
                     if let Some(text) = content.as_str() {
@@ -109,14 +111,12 @@ fn extract_semantic_text(payload: &Value) -> Option<String> {
                             if let Some(text) = block.as_str() {
                                 semantic_text.push_str(text);
                                 semantic_text.push('\n');
-                            } else if let Some(block_obj) = block.as_object() {
-                                if block_obj.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    if let Some(text) =
-                                        block_obj.get("text").and_then(|t| t.as_str())
-                                    {
-                                        semantic_text.push_str(text);
-                                        semantic_text.push('\n');
-                                    }
+                            } else if block.is_object()
+                                && block.get("type").and_then(|t| t.as_str()) == Some("text")
+                            {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    semantic_text.push_str(text);
+                                    semantic_text.push('\n');
                                 }
                             }
                         }
@@ -140,8 +140,9 @@ fn extract_semantic_text(payload: &Value) -> Option<String> {
         semantic_text.push_str(clean_prompt.trim());
     }
     // 3. Google Gemini format
-    else if let Some(contents) = payload.get("contents").and_then(|c| c.as_array()) {
-        for content in contents.iter().rev() {
+    else if let Some(simd_json::BorrowedValue::Array(contents)) = payload.get("contents") {
+        for i in (0..contents.len()).rev() {
+            let content = &contents[i];
             if content.get("role").and_then(|r| r.as_str()) == Some("user") {
                 if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
                     for part in parts {
@@ -252,10 +253,11 @@ pub async fn execute_proxy(
     // If request payload is > 5MB, bypass PII checking, compliance, loop checks, and cache lookup,
     // and stream directly to upstream targets.
     if body_bytes.len() > 5 * 1024 * 1024 {
+        let mut pass_buffer = body_bytes.to_vec();
         let prep = crate::infrastructure::llm_router::prep_upstream_request(
             state,
             tenant_id,
-            body_bytes,
+            &mut pass_buffer,
             accept_header,
             strategy,
         ).await?;
@@ -290,7 +292,7 @@ pub async fn execute_proxy(
             crate::infrastructure::llm_router::execute_upstream_request(
                 state,
                 prep,
-                body_bytes,
+                &mut pass_buffer,
             )
             .await?;
 
@@ -386,9 +388,8 @@ pub async fn execute_proxy(
     // ── Stage 0: PII Redaction (fail-closed) ─────────────────────────────────
     let is_pii_match = pii_regex().is_match(raw_prompt);
 
-    // Lazily evaluate JSON only if necessary
-    let (body_bytes, parsed_value_if_needed): (axum::body::Bytes, Option<Value>) = if is_pii_match {
-        let mut parsed_body: Value = serde_json::from_slice(body_bytes)
+    let body_bytes = if is_pii_match {
+        let parsed_body: Value = serde_json::from_slice(body_bytes)
             .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
         let redacted = call_compliance_redact(
@@ -398,29 +399,31 @@ pub async fn execute_proxy(
             trace_ctx,
         )
         .await?;
-        parsed_body = redacted;
 
-        let redacted_bytes = serde_json::to_vec(&parsed_body).map_err(|e| {
+        let redacted_bytes = serde_json::to_vec(&redacted).map_err(|e| {
             GatewayError::ResponseBuild(format!("Failed to serialize redacted body: {}", e))
         })?;
-        (axum::body::Bytes::from(redacted_bytes), Some(parsed_body))
+        axum::body::Bytes::from(redacted_bytes)
     } else {
-        (body_bytes.clone(), None)
+        body_bytes.clone()
     };
+
+    let mut parse_buffer = body_bytes.to_vec();
 
     // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
-    let lazy_parsed = match parsed_value_if_needed {
-        Some(ref v) => v.clone(),
-        None => serde_json::from_slice(&body_bytes)
-            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?,
+    let (is_streaming, semantic_text) = {
+        let lazy_parsed = simd_json::to_borrowed_value(&mut parse_buffer)
+                .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+
+        let is_stream = lazy_parsed
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let sem_text = extract_semantic_text(&lazy_parsed);
+        (is_stream, sem_text)
     };
 
-    let is_streaming = lazy_parsed
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let semantic_text = extract_semantic_text(&lazy_parsed);
     let semantic_text_str = semantic_text.as_deref().unwrap_or("");
 
     // ── NEW PRECEDENCE RULE: Check Exact Cache BEFORE embedding ───────────────
@@ -501,7 +504,7 @@ pub async fn execute_proxy(
     let prep_future = llm_router::prep_upstream_request(
         state,
         tenant_id,
-        &body_bytes,
+        &mut parse_buffer,
         accept_header,
         strategy,
     );
@@ -531,7 +534,7 @@ pub async fn execute_proxy(
     let loop_future = crate::usecases::behavior_guard::enforce_loop_detection(
         state,
         &trace_ctx.session_id,
-        &lazy_parsed,
+        &body_bytes,
     );
 
     if let Err(e) = tokio::try_join!(token_future, loop_future) {
@@ -679,7 +682,7 @@ pub async fn execute_proxy(
         llm_router::execute_upstream_request(
             state,
             prep,
-            &body_bytes, // Pass bytes for zero-copy proxy
+            &mut parse_buffer, // Pass mut bytes for zero-copy proxy
         )
         .await?;
 
@@ -989,6 +992,7 @@ fn handle_streaming_response(
                 let provider_id = target.schema_format.as_str();
                 let config = crate::infrastructure::llm_router::get_provider_config(provider_id);
 
+                let mut stream_buffer = body_bytes_stream.to_vec();
                 let fallback_req = match crate::infrastructure::llm_router::build_provider_request(
                     &state_stream.http_client,
                     &config,
@@ -996,7 +1000,7 @@ fn handle_streaming_response(
                     &target.api_key,
                     &prep.model,
                     &target.target_model,
-                    &body_bytes_stream,
+                    &mut stream_buffer,
                     &prep.accept_header,
                 ) {
                     Ok(req) => req,
@@ -1644,6 +1648,11 @@ mod tests {
 
     #[test]
     fn test_extract_semantic_text_formats() {
+        fn extract_from_value(value: serde_json::Value) -> Option<String> {
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            let parsed = simd_json::to_borrowed_value(&mut bytes).unwrap();
+            extract_semantic_text(&parsed)
+        }
         // 1. OpenAI format
         let openai_payload = json!({
             "model": "gpt-4",
@@ -1653,7 +1662,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&openai_payload),
+            extract_from_value(openai_payload),
             Some("Explain vector databases.".to_string())
         );
 
@@ -1663,7 +1672,7 @@ mod tests {
             "prompt": "\n\nHuman: What is latent space?\n\nAssistant:"
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_legacy),
+            extract_from_value(anthropic_legacy),
             Some("What is latent space?".to_string())
         );
 
@@ -1683,7 +1692,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_messages),
+            extract_from_value(anthropic_messages),
             Some("How does HNSW index work?".to_string())
         );
 
@@ -1699,7 +1708,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&gemini_payload),
+            extract_from_value(gemini_payload),
             Some("What is Cosine Similarity?".to_string())
         );
 
@@ -1707,7 +1716,7 @@ mod tests {
         let unsupported_payload = json!({
             "invalid_key": "some value"
         });
-        assert_eq!(extract_semantic_text(&unsupported_payload), None);
+        assert_eq!(extract_from_value(unsupported_payload), None);
 
         // 6. OpenAI Multi-Turn format (only the last user message should be extracted)
         let openai_multiturn = json!({
@@ -1719,7 +1728,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&openai_multiturn),
+            extract_from_value(openai_multiturn),
             Some("Explain vector databases.".to_string())
         );
 
@@ -1741,7 +1750,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&gemini_multiturn),
+            extract_from_value(gemini_multiturn),
             Some("What is Cosine Similarity?".to_string())
         );
 
@@ -1751,7 +1760,7 @@ mod tests {
             "prompt": "\n\nHuman: Hello, how are you?\n\nAssistant: I am good!\n\nHuman: What is latent space?\n\nAssistant:"
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_multiturn),
+            extract_from_value(anthropic_multiturn),
             Some("What is latent space?".to_string())
         );
     }

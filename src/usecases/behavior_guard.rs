@@ -15,7 +15,7 @@ use simd_json::prelude::*;
 pub async fn enforce_loop_detection(
     _state: &Arc<AppState>,
     session_id: &str,
-    _body: &serde_json::Value,
+    _body: &[u8],
 ) -> Result<(), GatewayError> {
     Ok(())
 }

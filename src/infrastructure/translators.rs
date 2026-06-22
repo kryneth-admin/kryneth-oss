@@ -12,7 +12,7 @@ pub enum AppError {
 }
 
 pub trait BaseTranslator: Send + Sync {
-    fn to_universal(&self, payload: Value) -> Result<KrynethConversation, AppError>;
+    fn to_universal(&self, payload: &mut [u8]) -> Result<KrynethConversation, AppError>;
     #[allow(clippy::wrong_self_convention)]
     fn from_universal(&self, conv: &KrynethConversation) -> Result<Value, AppError>;
     fn unify_response(&self, raw: Value) -> Result<StandardResponse, AppError>;
@@ -68,8 +68,8 @@ pub struct OpenAIFunctionCall {
 pub struct OpenAiTranslator;
 
 impl BaseTranslator for OpenAiTranslator {
-    fn to_universal(&self, payload: Value) -> Result<KrynethConversation, AppError> {
-        let req: OpenAIChatRequest = serde_json::from_value(payload)
+    fn to_universal(&self, payload: &mut [u8]) -> Result<KrynethConversation, AppError> {
+        let req: OpenAIChatRequest = simd_json::from_slice(payload)
             .map_err(|e| AppError::TranslationError(format!("OpenAI parse error: {}", e)))?;
 
         let mut system_prompt = None;
@@ -352,7 +352,7 @@ pub struct AnthropicImageSource {
 pub struct AnthropicTranslator;
 
 impl BaseTranslator for AnthropicTranslator {
-    fn to_universal(&self, _payload: Value) -> Result<KrynethConversation, AppError> {
+    fn to_universal(&self, _payload: &mut [u8]) -> Result<KrynethConversation, AppError> {
         Err(AppError::TranslationError(
             "Anthropic to_universal not fully implemented".to_string(),
         ))
@@ -573,7 +573,7 @@ impl BaseTranslator for AnthropicTranslator {
 pub struct GeminiTranslator;
 
 impl BaseTranslator for GeminiTranslator {
-    fn to_universal(&self, _payload: Value) -> Result<KrynethConversation, AppError> {
+    fn to_universal(&self, _payload: &mut [u8]) -> Result<KrynethConversation, AppError> {
         Err(AppError::TranslationError(
             "Gemini to_universal not fully implemented".to_string(),
         ))
