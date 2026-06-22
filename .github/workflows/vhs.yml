@@ -14,11 +14,18 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Install ffmpeg and ttyd
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg ttyd
         
       - name: Render VHS tapes
         uses: charmbracelet/vhs-action@v2
         with:
           path: 'docs/'
+        env:
+          ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: 'true'
 
       - name: Commit generated GIFs
         uses: stefanzweifel/git-auto-commit-action@v5
