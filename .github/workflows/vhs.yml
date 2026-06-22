@@ -15,10 +15,52 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install ffmpeg and ttyd
+      - name: Install ffmpeg and ttyd (robust)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg ttyd
+          set -euxo pipefail
+
+          sudo apt-get update -y
+
+          # Try apt install first
+          if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg ttyd; then
+            echo "ffmpeg & ttyd installed via apt"
+          else
+            echo "apt install failed for ffmpeg — falling back to static ffmpeg build"
+
+            # Ensure required tools are present
+            sudo apt-get install -y curl tar xz-utils
+
+            TMPDIR=$(mktemp -d)
+            cd "$TMPDIR"
+
+            # Download a recent static ffmpeg build (amd64).
+            curl -fsSL -o ffmpeg-static.tar.xz "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+
+            tar -xf ffmpeg-static.tar.xz
+            # Find extracted directory and copy binaries
+            EXTRACTED_DIR=$(find . -maxdepth 1 -type d -name "ffmpeg-*-amd64-static" | head -n1)
+            if [ -z "$EXTRACTED_DIR" ]; then
+              echo "Failed to find extracted ffmpeg directory" >&2
+              ls -la
+              exit 1
+            fi
+
+            sudo cp "$EXTRACTED_DIR/ffmpeg" "$EXTRACTED_DIR/ffprobe" /usr/local/bin/
+            sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+            cd -
+            rm -rf "$TMPDIR"
+
+            # Try to install ttyd via apt (best effort)
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ttyd; then
+              echo "ttyd installed via apt"
+            else
+              echo "ttyd install via apt failed. If vhs-action needs ttyd and this still fails, add a ttyd install fallback."
+            fi
+          fi
+
+          # Verify
+          which ffmpeg || { echo "ffmpeg not found in PATH"; exit 1; }
+          ffmpeg -version
         
       - name: Render VHS tapes
         uses: charmbracelet/vhs-action@v2

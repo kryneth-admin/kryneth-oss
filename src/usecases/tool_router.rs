@@ -379,27 +379,6 @@ impl ToolRegistry {
     /// ## Fail-Open
     /// Any parse or serialisation error returns `None` — the original bytes
     /// are forwarded and no schemas are stripped.
-
-    /// Strips `parameters` schemas from registered MCP tools in the outbound
-    /// `tools` array and injects 1-line semantic summaries.
-    ///
-    /// ## Return value
-    /// * `Some(bytes)` — the modified request body, serialised into an
-    ///   arena-backed buffer then returned as an owned `Vec<u8>`.
-    /// * `None` — no registered tools were found, or parsing failed.
-    ///   The caller should forward the original `body_bytes` unchanged.
-    ///
-    /// ## Memory behaviour
-    /// * The `serde_json::Value` tree is created only for the mutation pass;
-    ///   it is dropped before the function returns.
-    /// * The serialised output bytes are written via [`BumpWriter`] directly
-    ///   into the bumpalo `arena`; the final `Vec<u8>` is a single O(n) copy
-    ///   from arena memory into owned heap memory.  All intermediate arena
-    ///   allocations are freed in O(1) when the caller drops `arena`.
-    ///
-    /// ## Fail-Open
-    /// Any parse or serialisation error returns `None` — the original bytes
-    /// are forwarded and no schemas are stripped.
     pub fn inject_lazy_summaries(
         &self,
         body_bytes: &[u8],

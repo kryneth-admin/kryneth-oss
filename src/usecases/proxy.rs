@@ -233,6 +233,7 @@ async fn get_client_config(state: &Arc<AppState>, tenant_id: &str) -> ClientConf
         semantic_cache_threshold: 0.85,
     }
 }
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_proxy(
     state: &Arc<AppState>,
     body_bytes: &axum::body::Bytes,
@@ -889,6 +890,7 @@ fn has_error_signature(chunk: &[u8]) -> bool {
         || chunk.windows(15).any(|w| w == b"\"billing_limit\"")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_streaming_response(
     state: &Arc<AppState>,
     upstream_response: reqwest::Response,
