@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://www.docker.com/)
-[![Discord](https://img.shields.io/discord/1234567890?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/kryneth)
+[![Discord](https://img.shields.io/discord/1234567890?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/uurgj9fMy8)
 
 > **Agents don't fail loudly. They fail silently, burn money, and nobody notices until production breaks.**
 >
@@ -248,24 +248,6 @@ curl -X POST http://localhost:8080/v1/chat/completions \
     ]
   }'
 ```
-
----
-
-## 🗺️ Roadmap
-
-**Today**
-* Loop Detection
-* Tool Governance
-* MCP Control
-* Cost Tracking
-
-**Next**
-* Incident Replay
-* Reliability Analytics
-* Agent Risk Scoring
-* Fleet Governance
-
----
 
 ## 🏛️ Open-Core Transparency
 
