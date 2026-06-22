@@ -148,6 +148,114 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 }
 ```
 
+## Framework Integrations
+
+Drop Kryneth into your existing code by changing just two variables. No new SDKs required.
+
+### Python (OpenAI SDK)
+```python
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-kryneth-..."
+)
+```
+
+### Python (LangChain)
+```python
+llm = ChatOpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-kryneth-...",
+    model="llama-3.3-70b-versatile"
+)
+```
+
+### Node.js (OpenAI SDK)
+```javascript
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/v1",
+  apiKey: "sk-kryneth-..."
+});
+```
+
+### Rust (async-openai)
+```rust
+let config = OpenAIConfig::new()
+    .with_api_base("http://localhost:8080/v1")
+    .with_api_key("sk-kryneth-...");
+let client = Client::with_config(config);
+```
+
+### Kotlin
+```kotlin
+val openai = OpenAI(
+    host = OpenAIHost("http://localhost:8080/v1"),
+    token = "sk-kryneth-..."
+)
+```
+
+## Local MCP Quickstart
+
+Kryneth features "Tunnel 3", a low-latency Model Context Protocol (MCP) router. It maps LLM tool calls to local/remote MCP SSE (Server-Sent Events) endpoints.
+
+### Step 1: Start a Dummy MCP Server
+Let's use a simple mock Node.js SSE server running on port 9000. 
+
+```bash
+npx -y @modelcontextprotocol/mock-server --port 9000
+```
+
+### Step 2: Configure Kryneth
+Set the `MCP_TOOL_REGISTRY` environment variable to map the tool name to your local SSE URL, then start Kryneth:
+
+```bash
+export MCP_TOOL_REGISTRY='{"query_db":"http://localhost:9000/sse"}'
+cargo run --release
+```
+
+### Step 3: Trigger the Tool
+Force the LLM to use the configured tool by sending a standard chat completion request:
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Run a query on the DB"
+      }
+    ]
+  }'
+```
+
+### Step 4: Show the Result
+Kryneth executes the tool call against your local MCP server and streams the result back.
+
+```json
+{
+  "id": "chatcmpl-mcp-456",
+  "object": "chat.completion",
+  "created": 1717166000,
+  "model": "llama-3",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "I queried the database. The query executed successfully and returned 5 rows."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 18,
+    "completion_tokens": 16,
+    "total_tokens": 34
+  }
+}
+```
+
 ## Testing Suite
 
 ### Run All Tests

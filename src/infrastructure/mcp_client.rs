@@ -1,4 +1,4 @@
-//! infrastructure/mcp_client.rs — Tunnel 3 Phase 4: Bounded Parallel Fan-Out.
+//! infrastructure/mcp_client.rs — Tunnel 3 
 //!
 //! ## Architecture (Phase 4 upgrade)
 //! ```text

@@ -1,0 +1,27 @@
+name: Render VHS Tapes
+
+on:
+  push:
+    paths:
+      - '**/*.tape'
+  workflow_dispatch:
+
+jobs:
+  vhs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: Render VHS tapes
+        uses: charmbracelet/vhs-action@v2
+        with:
+          path: 'docs/'
+
+      - name: Commit generated GIFs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: auto-generate VHS terminal GIFs"
+          file_pattern: 'docs/*.gif'
