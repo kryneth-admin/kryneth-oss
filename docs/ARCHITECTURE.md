@@ -1,4 +1,4 @@
-# Kryneth Gateway Architecture
+# Kryneth Runtime Control Plane Architecture
 
 ## System Overview
 Kryneth is an ultra-low latency L7 runtime control plane for autonomous AI agents. It sits between multi-turn agentic frameworks and LLM providers to provide real-time safety guardrails and monitoring.
@@ -22,8 +22,8 @@ Kryneth is an ultra-low latency L7 runtime control plane for autonomous AI agent
 - SIMD-accelerated JSON parsing via `simd-json`
 - Returns standardized `UnifiedToolCall` structure
 
-### 4. Safety Guards
-- **Infinite Loop Detector**: Tracks tool signatures over 60s window
+### 4. Reliability & Safety Guards
+- **Runaway Loop Protection**: Tracks tool signatures over 60s window
 - **Tool Storm Guard**: Enforces max tool executions per session
 - **Circuit Breaker**: Auto-failover on provider failures
 - Memory-optimized via Moka cache and DashMap
@@ -53,7 +53,7 @@ pub struct UnifiedToolCall {
 }
 ```
 
-### Infinite Loop Detector
+### Runaway Loop Protection
 ```
 Input: Tool call stream
 ↓

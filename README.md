@@ -4,6 +4,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://www.docker.com/)
+[![Discord](https://img.shields.io/discord/1234567890?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/kryneth)
 
 > **Agents don't fail loudly. They fail silently, burn money, and nobody notices until production breaks.**
 >
@@ -115,19 +116,24 @@ graph TD
     subgraph Firewall ["Kryneth Runtime Control Plane"]
         Ingress["Kryneth Ingress<br/>(Axum HTTP & SSE Stream Router)"]:::ingress
         
-        subgraph Guardian ["Guardian Layer (Security & Abuse Firewall)"]
-            LoopTrap["Loop Detection<br/>(ahash signature trap)"]:::security
-            PII["PII Redaction<br/>(Regex Entity Filters)"]:::security
+        subgraph Guardian ["Reliability & Protection Layer"]
+            LoopTrap["Runaway Loop Protection<br/>(ahash signature trap)"]:::security
+            PII["PII Protection<br/>(Regex Entity Filters)"]:::security
         end
         
         subgraph RouteLayer ["Routing Layer (DX & Efficiency)"]
             L1Cache["L1 FastEmbed Cache<br/>(In-Memory Moka / DashMap)"]:::routing
             CircuitBreaker["Circuit Breaker & Fallbacks<br/>(Automatic hot-swaps)"]:::routing
+            MCPTunnel["MCP Server Tunnel<br/>(SSE Tool Routing)"]:::routing
         end
     end
     
     subgraph Providers ["Upstream LLM Layer"]
         OpenAI["OpenAI / Anthropic / Gemini / Groq"]:::upstream
+    end
+
+    subgraph External ["Local / Remote Resources"]
+        MCPServer["MCP Servers<br/>(Databases, Internal APIs)"]:::upstream
     end
 
     %% Flow connections
@@ -138,6 +144,8 @@ graph TD
     
     L1Cache -->|Cache Miss| CircuitBreaker
     CircuitBreaker -->|Route Call| OpenAI
+    MCPTunnel -->|Execute Tool| MCPServer
+    MCPServer -->|Return Data| MCPTunnel
     
     %% Fast responses
     L1Cache -->|Cache Hit - Fast Path 1.4ms| Ingress
@@ -145,6 +153,7 @@ graph TD
     
     %% Output
     OpenAI --> Ingress
+    MCPTunnel --> Ingress
     Ingress --> Agent
 ```
 
@@ -272,6 +281,16 @@ Kryneth uses a strict open-core model. Users don't buy infrastructure components
 
 > **OSS Choice:** Best suited for local agent setups, single-node proxies, and developer environments.
 > **Enterprise Choice:** Tailored for production scale and compliance-sensitive enterprises requiring real-time analytical dashboards.
+
+---
+
+## 🤝 Community & Support
+
+Building autonomous agents is hard. Let's figure it out together.
+
+* **[Join our Discord](https://discord.gg/uurgj9fMy8)** to chat with other engineers building production AI, share MCP tool ideas, and get direct help from the maintainers.
+* **GitHub Issues:** For bug reports and feature requests.
+* **GitHub Discussions:** For architectural questions and Q&A.
 
 ---
 
