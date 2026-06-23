@@ -163,30 +163,66 @@ graph TD
 
 > 🏎️ **Performance Note:** Kryneth is built entirely in memory-safe Rust with `bumpalo` and `simd-json`. It adds virtually zero latency overhead (**P90 latency ~2.1ms**) between your agent and the LLM.
 
-### Step 1: Docker Magic
-Run the Kryneth gateway container on port `8080` instantly. Clone the repo and boot the system with one command:
+### One-Command Setup
+
+**Linux/macOS:**
+```bash
+git clone https://github.com/kryneth-admin/kryneth-oss.git && cd kryneth-oss
+bash setup.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/kryneth-admin/kryneth-oss.git
+cd kryneth-oss
+.\setup.ps1
+```
+
+> ✨ The setup script automatically:
+> - ✓ Copies `.env` and `routing.yaml` from templates
+> - ✓ Validates prerequisites (Docker, Rust, Git)
+> - ✓ Checks your API key configuration
+> - ✓ Shows deployment options
+
+---
+
+### Step 1: Docker Compose (Recommended)
+Run Kryneth on port `8080` instantly:
 
 ```bash
-# Clone the repository
-git clone https://github.com/kryneth-admin/kryneth-oss.git && cd kryneth-oss
-
-# Copy templates to default config files
-cp env.example .env
-cp routing.yaml.example routing.yaml
-
-# Boot up the control plane
 docker-compose up -d --build
 ```
 
+**Available at:** `http://localhost:8080`
+
 > [!NOTE]
-> If you prefer raw Docker, you can run Kryneth directly by passing the config environment file:
+> Alternative deployment options:
+> 
+> **Option A: Local Development**
 > ```bash
+> cargo run --release
+> ```
+>
+> **Option B: Raw Docker**
+> ```bash
+> docker build -t kryneth-gateway:latest .
 > docker run -d --name kryneth-gateway \
 >   -p 8080:8080 \
 >   -v $(pwd)/routing.yaml:/app/routing.yaml \
 >   --env-file .env \
->   kryneth-gateway-oss:latest
+>   kryneth-gateway:latest
 > ```
+>
+> **Option C: Docker Hub (Production)**
+> ```bash
+> docker pull krynethgw/kryneth-gateway:latest
+> docker run -d --name kryneth-gateway \
+>   -p 8080:8080 \
+>   -v $(pwd)/routing.yaml:/app/routing.yaml \
+>   --env-file .env \
+>   krynethgw/kryneth-gateway:latest
+> ```
+> See [Docker Hub Deployment Guide](./docs/DOCKER_HUB.md) for details.
 
 ### Step 2: Configuration
 Configure your models in `routing.yaml`. Kryneth maps virtual models to failover-prioritized providers using environment-injected API keys.
@@ -263,6 +299,47 @@ Kryneth uses a strict open-core model. Users don't buy infrastructure components
 
 > **OSS Choice:** Best suited for local agent setups, single-node proxies, and developer environments.
 > **Enterprise Choice:** Tailored for production scale and compliance-sensitive enterprises requiring real-time analytical dashboards.
+
+---
+
+## 📚 Documentation & Resources
+
+Complete guides for every use case:
+
+| Guide | Purpose | Best For |
+|-------|---------|----------|
+| **[Getting Started](./docs/GETTING_STARTED.mdx)** | Installation & first request | New users, developers |
+| **[Configuration Reference](./docs/CONFIGURATION.md)** | All settings explained | Advanced setup, tuning |
+| **[Docker Hub Deployment](./docs/DOCKER_HUB.md)** | Cloud & production deployments | AWS, GCP, Kubernetes, ECS |
+| **[API Reference](./docs/API.md)** | Full API endpoint documentation | Integration & SDK building |
+| **[Troubleshooting](./docs/TROUBLESHOOTING.md)** | Common issues & solutions | Debugging problems |
+| **[Architecture Deep Dive](./docs/ARCHITECTURE.md)** | System design & internals | Contributors, advanced users |
+
+### Setup Helpers
+
+- **[setup.sh](./setup.sh)** - Automated setup for Linux/macOS
+- **[setup.ps1](./setup.ps1)** - Automated setup for Windows PowerShell
+- **[.env.example](./env.example)** - Heavily commented configuration template
+- **[routing.yaml.example](./routing.yaml.example)** - Provider routing examples
+
+### Quick Reference
+
+```bash
+# One-command setup (Linux/macOS)
+bash setup.sh
+
+# One-command setup (Windows)
+.\setup.ps1
+
+# Docker Compose (recommended)
+docker-compose up -d --build
+
+# Local development
+cargo run --release
+
+# Docker Hub (production)
+docker run -p 8080:8080 --env-file .env -v $(pwd)/routing.yaml:/app/routing.yaml krynethgw/kryneth-gateway:latest
+```
 
 ---
 

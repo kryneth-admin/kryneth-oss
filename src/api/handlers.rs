@@ -55,7 +55,7 @@ struct ExtractModel<'a> {
 }
 
 /// POST /v1/chat/completions
-#[instrument(skip(state, body_bytes, extensions))]
+#[instrument(skip(state, body_bytes, extensions, headers))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Extension(trace_ctx): Extension<TraceContext>,
