@@ -35,9 +35,9 @@ Type "  -H 'Authorization: Bearer sk-local-dev-key' \"
 Enter
 Type "  -d '{"
 Enter
-Type "    \"model\": \"claude-3-opus\","
+Type '    "model": "claude-3-opus",'
 Enter
-Type "    \"messages\": [{\"role\": \"user\", \"content\": \"Initialize core systems.\"}]"
+Type '    "messages": [{"role": "user", "content": "Initialize core systems."}]'
 Enter
 Type "  }' | jq"
 Enter
@@ -51,43 +51,43 @@ Type "cat << 'EOF'"
 Enter
 Type "{"
 Enter
-Type "  \"id\": \"chatcmpl-kryneth-1234\","
+Type '  "id": "chatcmpl-kryneth-1234",'
 Enter
-Type "  \"object\": \"chat.completion\","
+Type '  "object": "chat.completion",'
 Enter
-Type "  \"created\": 1718881234,"
+Type '  "created": 1718881234,'
 Enter
-Type "  \"model\": \"claude-3-opus\","
+Type '  "model": "claude-3-opus",'
 Enter
-Type "  \"choices\": ["
+Type '  "choices": ['
 Enter
-Type "    {"
+Type '    {'
 Enter
-Type "      \"index\": 0,"
+Type '      "index": 0,'
 Enter
-Type "      \"message\": {"
+Type '      "message": {'
 Enter
-Type "        \"role\": \"assistant\","
+Type '        "role": "assistant",'
 Enter
-Type "        \"content\": \"Core systems initialized. Multi-LLM routing active. TTFV optimal.\""
+Type '        "content": "Core systems initialized. Multi-LLM routing active. TTFV optimal."'
 Enter
-Type "      },"
+Type '      },'
 Enter
-Type "      \"finish_reason\": \"stop\""
+Type '      "finish_reason": "stop"'
 Enter
-Type "    }"
+Type '    }'
 Enter
-Type "  ],"
+Type '  ],'
 Enter
-Type "  \"usage\": {"
+Type '  "usage": {'
 Enter
-Type "    \"prompt_tokens\": 12,"
+Type '    "prompt_tokens": 12,'
 Enter
-Type "    \"completion_tokens\": 15,"
+Type '    "completion_tokens": 15,'
 Enter
-Type "    \"total_tokens\": 27"
+Type '    "total_tokens": 27'
 Enter
-Type "  }"
+Type '  }'
 Enter
 Type "}"
 Enter
