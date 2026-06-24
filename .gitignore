@@ -44,6 +44,9 @@ logs.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+docs/*.llm_hotswap.tape
+docs/*.agent_loop_detected.tape
+
 
 # Dependencies
 node_modules/
