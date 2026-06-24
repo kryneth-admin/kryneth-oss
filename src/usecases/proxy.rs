@@ -427,27 +427,25 @@ pub async fn execute_proxy(
     let semantic_text_str = semantic_text.as_deref().unwrap_or("");
 
     // ── NEW PRECEDENCE RULE: Check Exact Cache BEFORE embedding ───────────────
-    if client_config.semantic_cache_enabled {
-        if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
-            info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
-            return handle_cache_hit(
-                state,
-                cached_content,
-                tenant_id,
-                model_name,
-                raw_prompt,
-                semantic_text_str,
-                trace_ctx,
-                start_time,
-                is_streaming,
-                is_free_tier,
-                client_config.semantic_cache_enabled,
-            );
-        }
+    if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
+        info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
+        return handle_cache_hit(
+            state,
+            cached_content,
+            tenant_id,
+            model_name,
+            raw_prompt,
+            semantic_text_str,
+            trace_ctx,
+            start_time,
+            is_streaming,
+            is_free_tier,
+            client_config.semantic_cache_enabled,
+        );
     }
 
     // Step 1: Speculatively generate embedding if semantic text exists
-    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled {
+    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled && state.semantic_cache.is_enabled() {
         if let Some(ref sem_text) = semantic_text {
             match state.l1_cache.embed_client.embed(sem_text).await {
                 Ok(vec) => Some(vec),

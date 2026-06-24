@@ -112,6 +112,9 @@ pub trait RoutingConfigPort: Send + Sync {
 /// OSS binary.
 #[allow(clippy::type_complexity)]
 pub trait SemanticCachePort: Send + Sync {
+    /// Returns true if semantic caching is supported by this adapter.
+    fn is_enabled(&self) -> bool { true }
+
     /// Look up a semantically similar prompt in the L2 cache.
     ///
     /// Returns `Some((response_content, original_prompt))` on a hit, or `None`

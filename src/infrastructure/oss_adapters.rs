@@ -138,6 +138,10 @@ impl RoutingConfigPort for OssRoutingConfig {
 pub struct OssSemanticCache;
 
 impl SemanticCachePort for OssSemanticCache {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     fn lookup<'a>(
         &'a self,
         _tenant_id: &'a str,

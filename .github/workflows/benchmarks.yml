@@ -1,0 +1,72 @@
+name: Load Testing Benchmarks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  benchmark:
+    name: Run k6 Load Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Start Mock Upstream Server
+        run: cargo run --example mock_upstream --release &
+
+      - name: Start Kryneth Gateway
+        run: cargo run --release &
+
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for mock upstream (port 8090)..."
+          while ! nc -z localhost 8090; do sleep 1; done
+          echo "Waiting for Kryneth Gateway (port 8080)..."
+          while ! nc -z localhost 8080; do sleep 1; done
+          echo "Services are ready!"
+
+      - name: Run Cache Hit Benchmark
+        run: |
+          echo "## Cache Hit Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/cache_hit_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run PII Scrubbing Benchmark
+        run: |
+          echo "## PII Scrubbing Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/pii_scrubbing_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run Loop Detection Benchmark
+        run: |
+          echo "## Loop Detection Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/loop_detection_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run Mixed Workload Benchmark
+        run: |
+          echo "## Mixed Workload Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/mixed_workload_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
