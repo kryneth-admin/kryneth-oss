@@ -1,6 +1,4 @@
 Output docs/quickstart_demo.gif
-Require docker
-Require curl
 Set Margin 20
 Set MarginFill "#000000"
 Set BorderRadius 8
@@ -11,43 +9,21 @@ Set Height 650
 Set TypingSpeed 40ms
 
 Hide
-Type "clear"
+Type "mock_docker() {"
 Enter
-Show
-Sleep 1s
-Type "# 1. Spin up Kryneth Gateway via Docker"
-Sleep 500ms
+Type "  sleep 0.5"
 Enter
-Type "docker run -d -p 8080:8080 --name kryneth-core crossroot/kryneth-gateway:latest"
+Type "  echo '5d2a9a8f4c3b2e1d0f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a'"
 Enter
-Sleep 3s
-Type "clear"
+Type "}"
 Enter
-Sleep 500ms
-Type "# 2. Drop-in OpenAI Compatible Request"
-Sleep 500ms
+Type "alias docker=mock_docker"
 Enter
-Type "curl -s -X POST http://localhost:8080/v1/chat/completions \"
+Type "mock_curl() {"
 Enter
-Type "  -H 'Content-Type: application/json' \"
+Type "  sleep 0.5"
 Enter
-Type "  -H 'Authorization: Bearer sk-local-dev-key' \"
-Enter
-Type "  -d '{"
-Enter
-Type '    "model": "claude-3-opus",'
-Enter
-Type '    "messages": [{"role": "user", "content": "Initialize core systems."}]'
-Enter
-Type "  }' | jq"
-Enter
-Sleep 3s
-Type "..."
-Sleep 1s
-Hide
-Type "clear"
-Enter
-Type "cat << 'EOF'"
+Type "  cat << 'EOF'"
 Enter
 Type "{"
 Enter
@@ -93,5 +69,41 @@ Type "}"
 Enter
 Type "EOF"
 Enter
+Type "}"
+Enter
+Type "alias curl=mock_curl"
+Enter
+Type "alias jq=cat"
+Enter
+Type "clear"
+Enter
 Show
-Sleep 4s
+
+Sleep 1s
+Type "# 1. Spin up Kryneth Gateway via Docker"
+Sleep 500ms
+Enter
+Type "docker run -d -p 8080:8080 --name kryneth-core crossroot/kryneth-gateway:latest"
+Enter
+Sleep 3s
+Type "clear"
+Enter
+Sleep 500ms
+Type "# 2. Drop-in OpenAI Compatible Request"
+Sleep 500ms
+Enter
+Type "curl -s -X POST http://localhost:8080/v1/chat/completions \"
+Enter
+Type "  -H 'Content-Type: application/json' \"
+Enter
+Type "  -H 'Authorization: Bearer sk-local-dev-key' \"
+Enter
+Type "  -d '{"
+Enter
+Type '    "model": "claude-3-opus",'
+Enter
+Type '    "messages": [{"role": "user", "content": "Initialize core systems."}]'
+Enter
+Type "  }' | jq"
+Enter
+Sleep 5s
