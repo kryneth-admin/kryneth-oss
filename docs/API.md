@@ -5,7 +5,72 @@ Kryneth Gateway intercepts AI agent requests and provides real-time control, mon
 
 ## Base URL
 ```
-http://0.0.0.0:8080
+http://localhost:8080/v1
+```
+
+## SDK Drop-In Integrations
+
+Kryneth acts as a transparent, OpenAI-compatible proxy. You do not need to rewrite your agent's code—simply point the SDK to Kryneth's base URL and inject your gateway credentials.
+
+### Python (OpenAI SDK)
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="sk-local-dev-key", # Maps to KRYNETH_VALID_KEYS
+    default_headers={
+        "x-tenant-id": "prod-tenant-uuid", # Identifies the routing.yaml configuration
+        "x-session-id": "agent-session-42" # Groups tool calls for infinite loop detection
+    }
+)
+
+response = client.chat.completions.create(
+    model="claude-3-opus", # Virtual route defined in routing.yaml
+    messages=[{"role": "user", "content": "Initialize core systems."}]
+)
+```
+
+### Node.js / TypeScript (OpenAI SDK)
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  baseURL: "http://localhost:8080/v1",
+  apiKey: "sk-local-dev-key",
+  defaultHeaders: {
+    "x-tenant-id": "prod-tenant-uuid",
+    "x-session-id": "agent-session-42"
+  }
+});
+
+const response = await openai.chat.completions.create({
+  model: "claude-3-opus",
+  messages: [{ role: "user", content: "Initialize core systems." }],
+});
+```
+
+### Kotlin (OpenAI SDK / Ktor)
+```kotlin
+val openai = OpenAI(
+    token = "sk-local-dev-key",
+    host = OpenAIHost("http://localhost:8080/v1"),
+    headers = mapOf(
+        "x-tenant-id" to "prod-tenant-uuid",
+        "x-session-id" to "agent-session-42"
+    )
+)
+
+val chatCompletionRequest = ChatCompletionRequest(
+    model = ModelId("claude-3-opus"),
+    messages = listOf(
+        ChatMessage(
+            role = ChatRole.User,
+            content = "Initialize core systems."
+        )
+    )
+)
+val completion = openai.chatCompletion(chatCompletionRequest)
 ```
 
 ## Core Endpoints

@@ -20,6 +20,7 @@ jobs:
           # The official VHS docker image has ffmpeg, ttyd, and chromium perfectly pre-installed.
           docker run --rm -v ${{ github.workspace }}:/vhs ghcr.io/charmbracelet/vhs docs/agent_loop_blocked.tape
           docker run --rm -v ${{ github.workspace }}:/vhs ghcr.io/charmbracelet/vhs docs/llm_hotswap.tape
+          docker run --rm -v ${{ github.workspace }}:/vhs ghcr.io/charmbracelet/vhs docs/quickstart_demo.tape
           
           # Docker writes files as root. Fix permissions and move to docs/ folder so the commit action finds them.
           sudo chown -R $USER:$USER .

@@ -1,19 +1,22 @@
-# Configuration Guide
+# Core Configuration
 
-Kryneth Gateway can be configured through environment variables, `routing.yaml`, and feature flags.
+Kryneth Gateway is configured via a strict hierarchy: **Environment Variables > `routing.yaml` > Defaults**.
+
+> [!IMPORTANT]
+> Environment variables always take precedence. Use them for secrets. Use `routing.yaml` for routing logic.
 
 ## Environment Variables
 
 ### Server Configuration
 ```bash
 # Server port
-KRYNETH_PORT=8080
-
-# Server host
-KRYNETH_HOST=0.0.0.0
+GATEWAY_PORT=8080
 
 # Logging level (trace, debug, info, warn, error)
 RUST_LOG=info
+
+# Comma-separated list of Bearer tokens allowed to hit the ingress
+KRYNETH_VALID_KEYS=dev_secret_123
 ```
 
 ### Rate Limiting

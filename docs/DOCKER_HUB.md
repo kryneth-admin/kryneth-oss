@@ -28,28 +28,36 @@ docker pull krynethgw/kryneth-gateway:latest
 
 ### 2. Create Configuration Files
 
-**Create `.env` file:**
+### 2. Configure Environment Variables
+
+Create a strict `.env` file to control the gateway's behavior and inject LLM credentials securely. 
+
+| Variable | Requirement | Default | Description |
+| :--- | :---: | :---: | :--- |
+| `GATEWAY_PORT` | **Required** | `8080` | The port the control plane binds to. |
+| `KRYNETH_VALID_KEYS` | **Required** | None | Comma-separated list of Bearer tokens allowed to hit the ingress. |
+| `[PROVIDER]_API_KEY` | **Required** | None | Your upstream API keys (e.g., `OPENAI_API_KEY`, `GROQ_API_KEY`). |
+| `MAX_SESSION_TOOL_CALLS` | Optional | `20` | Tool storm breaker: max concurrent tool calls per session window. |
+| `MAX_IDENTICAL_TOOL_CALLS` | Optional | `5` | Infinite loop breaker: max identical tool payload signatures. |
+| `RATE_LIMIT_MAX_REQUESTS` | Optional | `60` | RPM limit per tenant. |
+| `RUST_LOG` | Optional | `info` | Logging verbosity (`info`, `debug`, `trace`). |
+
+**Example `.env`:**
 ```bash
 cat > .env << 'EOF'
-# Gateway Server Configuration
+# Gateway Settings
 GATEWAY_PORT=8080
 RUST_LOG=info
-JWT_SECRET=your-jwt-secret-here
-
-# OSS Authentication
 KRYNETH_VALID_KEYS=dev_secret_123
 
-# LLM Provider Keys
-GROQ_API_KEY=gsk_your_groq_api_key_here
-COHERE_API_KEY=h28_your_cohere_key_here
-OPENAI_API_KEY=sk_your_openai_key_here
-ANTHROPIC_API_KEY=sk-ant-your_anthropic_key_here
+# Upstream Credentials
+GROQ_API_KEY=gsk_...
+OPENAI_API_KEY=sk_...
+ANTHROPIC_API_KEY=sk-ant-...
 
-# Safety Guards
+# Guardrails
 MAX_SESSION_TOOL_CALLS=20
 MAX_IDENTICAL_TOOL_CALLS=5
-RATE_LIMIT_MAX_REQUESTS=60
-RATE_LIMIT_WINDOW_SECS=60
 EOF
 ```
 
@@ -96,7 +104,9 @@ cat > routing.yaml << 'EOF'
 EOF
 ```
 
-### 3. Run the Container
+### 3. Run the Container & Mount Configs
+
+Kryneth uses a rigid file-based routing architecture. You **must** mount your `routing.yaml` into the container at `/app/routing.yaml`.
 
 **Basic Run:**
 ```bash
@@ -104,9 +114,11 @@ docker run -d \
   --name kryneth-gateway \
   -p 8080:8080 \
   --env-file .env \
-  -v $(pwd)/routing.yaml:/app/routing.yaml \
+  -v $(pwd)/routing.yaml:/app/routing.yaml:ro \
   krynethgw/kryneth-gateway:latest
 ```
+> [!IMPORTANT]
+> The `:ro` flag ensures the container only has read-only access to your local routing configuration.
 
 **With Custom Port:**
 ```bash

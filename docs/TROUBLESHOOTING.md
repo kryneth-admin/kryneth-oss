@@ -2,6 +2,18 @@
 
 Common issues and how to resolve them.
 
+## 🚨 Common Pitfalls & Immediate Fixes
+
+| Symptom / Error | Probable Cause | Immediate Fix |
+| :--- | :--- | :--- |
+| `Address already in use` | Port `8080` is taken by another service. | Set `GATEWAY_PORT=8081` in `.env` and restart. |
+| `Environment variable [X] not set` | Missing required upstream API key. | Inject the missing key into your `.env` file or Docker run command. |
+| `routing.yaml not found` | The volume mount path is incorrect. | Ensure `-v $(pwd)/routing.yaml:/app/routing.yaml:ro` is strictly followed. |
+| `MODEL_NOT_CONFIGURED` | The requested `model` doesn't exist in your `routing.yaml`. | Check that the `x-tenant-id` header and virtual model string match the config exactly. |
+| `INVALID_API_KEY` | Incorrect bearer token in SDK. | Verify `KRYNETH_VALID_KEYS` matches your `Authorization: Bearer <key>` header. |
+
+---
+
 ## Startup Issues
 
 ### Port Already in Use

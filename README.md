@@ -11,6 +11,22 @@
 > Kryneth is the runtime control plane that stops runaway loops, unsafe tool execution, and uncontrolled AI spend before they hit production. 
 > Built for LangGraph, CrewAI, AutoGen, Claude Code, OpenAI Agents SDK, and MCP workflows.
 
+<div align="center">
+  <img src="./docs/quickstart_demo.gif" alt="Kryneth Gateway Zero-to-Hero Setup" width="100%">
+</div>
+
+## ⚡ Zero-to-Hero Quick Start
+
+Drop Kryneth into your infrastructure in under 60 seconds.
+
+```bash
+# 1. Boot the gateway
+docker run -d -p 8080:8080 crossroot/kryneth-gateway:latest
+
+# 2. Point your existing OpenAI SDK to localhost
+export OPENAI_BASE_URL="http://localhost:8080/v1"
+```
+
 ---
 
 ## 🚫 Why a Runtime Control Plane?
