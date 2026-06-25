@@ -47,17 +47,17 @@ jobs:
           while ! nc -z localhost 8090; do sleep 1; done
           
           echo "Waiting for Kryneth Gateway (port 8080 HTTP health)..."
-          for i in $(seq 1 30); do
+          for i in $(seq 1 120); do
             if curl -sSf http://localhost:8080/health >/dev/null 2>&1; then
               echo "Gateway healthy"
               break
             fi
-            echo "Gateway not healthy yet: attempt $i/30..."
+            echo "Gateway not healthy yet: attempt $i/120..."
             sleep 1
           done
           
-          if ! ps -p $(cat gateway.pid) >/dev/null 2>&1; then
-            echo "Gateway process not running; dumping gateway.log"
+          if ! curl -sSf http://localhost:8080/health >/dev/null 2>&1; then
+            echo "Gateway failed to start within 120s! Dumping gateway.log"
             tail -n 200 gateway.log || true
             exit 1
           fi
