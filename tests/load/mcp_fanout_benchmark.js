@@ -15,6 +15,7 @@ const HEADERS = {
   'Content-Type': 'application/json',
   'Authorization': 'Bearer re_live_dev_123',
   'x-tenant-id': '00000000-0000-0000-0000-000000000000',
+  'x-kryneth-model': 'mock-model',
 };
 
 // Generates a mock MCP tool call request
