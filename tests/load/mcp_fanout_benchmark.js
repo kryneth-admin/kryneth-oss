@@ -13,7 +13,7 @@ export const options = {
 const BASE_URL = 'http://localhost:8080';
 const HEADERS = {
   'Content-Type': 'application/json',
-  'Authorization': 'Bearer test_token_123',
+  'Authorization': 'Bearer re_live_dev_123',
   'x-tenant-id': '00000000-0000-0000-0000-000000000000',
 };
 
