@@ -33,7 +33,7 @@ jobs:
         run: cargo run --example mock_upstream --release &
 
       - name: Start Kryneth Gateway
-        run: ROUTING_CONFIG_PATH=routing.bench.yaml cargo run --release &
+        run: COMPLIANCE_URL=http://localhost:8090 ROUTING_CONFIG_PATH=routing.bench.yaml cargo run --release &
 
       - name: Wait for services to be ready
         run: |
