@@ -30,19 +30,40 @@ jobs:
           sudo apt-get install k6
 
       - name: Start Mock Upstream Server
-        run: cargo run --example mock_upstream --release &
+        run: |
+          cargo run --example mock_upstream --release > mock_upstream.log 2>&1 & echo $! > mock_upstream.pid
 
       - name: Start Kryneth Gateway
-        run: COMPLIANCE_URL=http://localhost:8090 ROUTING_CONFIG_PATH=routing.bench.yaml cargo run --release &
+        run: |
+          ulimit -n 65536 || true
+          export RUST_LOG=debug
+          export RUST_BACKTRACE=1
+          COMPLIANCE_URL=http://localhost:8090 ROUTING_CONFIG_PATH=routing.bench.yaml \
+            cargo run --release > gateway.log 2>&1 & echo $! > gateway.pid
 
       - name: Wait for services to be ready
         run: |
           echo "Waiting for mock upstream (port 8090)..."
           while ! nc -z localhost 8090; do sleep 1; done
-          echo "Waiting for Kryneth Gateway (port 8080)..."
-          while ! nc -z localhost 8080; do sleep 1; done
-          echo "Services are ready! Adding mandatory 5s sleep..."
-          sleep 5
+          
+          echo "Waiting for Kryneth Gateway (port 8080 HTTP health)..."
+          for i in $(seq 1 30); do
+            if curl -sSf http://localhost:8080/health >/dev/null 2>&1; then
+              echo "Gateway healthy"
+              break
+            fi
+            echo "Gateway not healthy yet: attempt $i/30..."
+            sleep 1
+          done
+          
+          if ! ps -p $(cat gateway.pid) >/dev/null 2>&1; then
+            echo "Gateway process not running; dumping gateway.log"
+            tail -n 200 gateway.log || true
+            exit 1
+          fi
+          
+          echo "Services are ready! Adding mandatory 10s sleep..."
+          sleep 10
 
       - name: Run Cache Hit Benchmark
         run: |
@@ -97,3 +118,17 @@ jobs:
           echo "| Mixed Workload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
           echo "| Dynamic Payload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
           echo "| MCP Fanout | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Dump logs on failure or completion
+        if: always()
+        run: |
+          echo "=== Gateway (last 500 lines) ==="
+          [ -f gateway.log ] && tail -n 500 gateway.log || echo "gateway.log missing"
+          echo "=== Mock upstream (last 500 lines) ==="
+          [ -f mock_upstream.log ] && tail -n 500 mock_upstream.log || echo "mock_upstream.log missing"
+          echo "=== Gateway process info ==="
+          if [ -f gateway.pid ]; then
+            pid=$(cat gateway.pid)
+            ps -p $pid -o pid,cmd,etime || true
+            lsof -Pan -p $pid -i || true
+          fi
