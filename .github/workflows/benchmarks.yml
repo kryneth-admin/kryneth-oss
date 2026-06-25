@@ -41,7 +41,8 @@ jobs:
           while ! nc -z localhost 8090; do sleep 1; done
           echo "Waiting for Kryneth Gateway (port 8080)..."
           while ! nc -z localhost 8080; do sleep 1; done
-          echo "Services are ready!"
+          echo "Services are ready! Adding mandatory 5s sleep..."
+          sleep 5
 
       - name: Run Cache Hit Benchmark
         run: |
@@ -70,3 +71,29 @@ jobs:
           echo '```text' >> $GITHUB_STEP_SUMMARY
           k6 run tests/load/mixed_workload_benchmark.js >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run Dynamic Payload Benchmark
+        run: |
+          echo "## Dynamic Payload Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/dynamic_payload_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Run MCP Fanout Benchmark
+        run: |
+          echo "## MCP Fanout Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/mcp_fanout_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Print Summary Table
+        run: |
+          echo "## Benchmark Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Benchmark | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          echo "| Cache Hit | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| PII Scrubbing | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Loop Detection | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mixed Workload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Dynamic Payload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| MCP Fanout | ✅ Completed |" >> $GITHUB_STEP_SUMMARY

@@ -3,8 +3,8 @@ import { check, sleep } from 'k6';
 
 // k6 options configuration
 export const options = {
-  vus: 100, // 100 concurrent users
-  duration: '20s', // run for 20 seconds
+  vus: 1000, // 1000 concurrent users for extreme stress test
+  duration: '30s', // run for 30 seconds
   thresholds: {
     // Assertions: fail-rate < 1%, 95% of cache hits should be < 5ms
     http_req_failed: ['rate<0.01'],
