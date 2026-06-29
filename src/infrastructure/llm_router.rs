@@ -699,6 +699,8 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
         };
 
         (Arc::new(state), mock_server)

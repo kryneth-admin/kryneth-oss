@@ -38,14 +38,31 @@ impl BillingPort for OssBilling {
         })
     }
 
+    fn enforce_scoped_budget<'a>(
+        &'a self,
+        _tenant_id: &'a str,
+        _team_id: Option<&'a str>,
+        _key_alias: Option<&'a str>,
+        _model: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async {
+            // OSS mode does not enforce budgets
+            Ok(())
+        })
+    }
+
     fn process_billing_telemetry<'a>(
         &'a self,
         _trace_id: &'a str,
         _tenant_id: &'a str,
+        _team_id: Option<&'a str>,
+        _api_key_alias: Option<&'a str>,
         _provider: &'a str,
         _target_model: &'a str,
         _prompt_tokens: u64,
         _completion_tokens: u64,
+        _mcp_calls: u32,
+        _agent_loops: u32,
         _cache_hit: bool,
         _is_free_tier: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
@@ -128,7 +145,11 @@ impl RateLimitPort for OssRateLimit {
 pub struct OssRoutingConfig;
 
 impl RoutingConfigPort for OssRoutingConfig {
-    fn start_subscriber(&self, _routing_state: Arc<crate::domain::models::RoutingState>) {
+    fn start_subscriber(
+        &self,
+        _routing_state: Arc<crate::domain::models::RoutingState>,
+        _mcp_registry: Arc<crate::infrastructure::mcp_registry::McpConnectionRegistry>,
+    ) {
         // OSS is static and loaded from file at boot time
     }
 }

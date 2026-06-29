@@ -152,8 +152,8 @@ pub struct ToolMetrics {
 // ── Registry ──────────────────────────────────────────────────────────────────
 
 pub struct McpConnectionRegistry {
-    /// tool_name → SSE endpoint URL (read-only after construction).
-    registry: DashMap<String, String>,
+    /// tool_name → (endpoint URL, environment variables) (read-only after construction).
+    registry: DashMap<String, (String, std::collections::HashMap<String, String>)>,
     /// tool_name → result of the last speculative warm-up for that tenant+tool.
     /// Keys are `mcp_warmed_key(tenant_id, tool_name)` so tenants never see each other's warm state.
     pub warmed: DashMap<String, PreWarmedConnection>,
@@ -189,12 +189,12 @@ impl McpConnectionRegistry {
             }
         };
 
-        let registry: DashMap<String, String> = DashMap::new();
+        let registry: DashMap<String, (String, std::collections::HashMap<String, String>)> = DashMap::new();
         match serde_json::from_str::<std::collections::HashMap<String, String>>(&raw) {
             Ok(map) => {
                 let count = map.len();
                 for (k, v) in map {
-                    registry.insert(k, v);
+                    registry.insert(k, (v, std::collections::HashMap::new()));
                 }
                 info!(tool_count = count, "Tunnel 3 — MCP registry loaded");
             }
@@ -236,6 +236,14 @@ impl McpConnectionRegistry {
             .map(|m| (m.call_count, m.total_latency_ms))
     }
 
+    pub fn update_server(&self, name: String, url: String, env_vars: std::collections::HashMap<String, String>) {
+        self.registry.insert(name, (url, env_vars));
+    }
+
+    pub fn remove_server(&self, name: &str) {
+        self.registry.remove(name);
+    }
+
     // ── Query helpers ─────────────────────────────────────────────────────────
 
     #[inline]
@@ -244,13 +252,17 @@ impl McpConnectionRegistry {
     }
 
     pub fn get_url(&self, tool_name: &str) -> Option<String> {
-        self.registry.get(tool_name).map(|r| r.value().clone())
+        self.registry.get(tool_name).map(|r| r.value().0.clone())
+    }
+
+    pub fn get_env_vars(&self, tool_name: &str) -> Option<std::collections::HashMap<String, String>> {
+        self.registry.get(tool_name).map(|r| r.value().1.clone())
     }
 
     pub fn all_endpoints(&self) -> Vec<(String, String)> {
         self.registry
             .iter()
-            .map(|kv| (kv.key().clone(), kv.value().clone()))
+            .map(|kv| (kv.key().clone(), kv.value().0.clone()))
             .collect()
     }
 
@@ -366,7 +378,7 @@ mod tests {
     fn make_registry(tools: &[(&str, &str)]) -> McpConnectionRegistry {
         let registry = DashMap::new();
         for (name, url) in tools {
-            registry.insert(name.to_string(), url.to_string());
+            registry.insert(name.to_string(), (url.to_string(), std::collections::HashMap::new()));
         }
         McpConnectionRegistry {
             registry,

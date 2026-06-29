@@ -24,6 +24,7 @@ pub async fn enforce_loop_detection(
 #[instrument(skip(state, body_bytes), fields(session_id = %session_id))]
 pub async fn enforce_oss_agent_guardian(
     state: &Arc<AppState>,
+    tenant_id: &str,
     session_id: &str,
     body_bytes: &[u8],
 ) -> Result<(), GatewayError> {
@@ -52,13 +53,13 @@ pub async fn enforce_oss_agent_guardian(
                     if let Some(message) = first_choice.get("message") {
                         if let Some(tc) = message.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
                             }
                         }
                     } else if let Some(delta) = first_choice.get("delta") {
                         if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
                             }
                         }
                     }
@@ -69,7 +70,7 @@ pub async fn enforce_oss_agent_guardian(
                 if let Some(last_msg) = messages.last() {
                     if let Some(tc) = last_msg.get("tool_calls").and_then(|t| t.as_array()) {
                         if !tc.is_empty() {
-                            return enforce_oss_tool_calls(state, session_id, tc).await;
+                            return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
                         }
                     }
                 }
@@ -78,7 +79,7 @@ pub async fn enforce_oss_agent_guardian(
         }
     };
 
-    enforce_oss_tool_calls(state, session_id, tool_calls).await
+    enforce_oss_tool_calls(state, tenant_id, session_id, tool_calls).await
 }
 
 struct UnifiedToolCall {
@@ -141,20 +142,32 @@ impl UnifiedToolCall {
 
 async fn enforce_oss_tool_calls(
     state: &Arc<AppState>,
+    tenant_id: &str,
     session_id: &str,
     tool_calls: &[simd_json::BorrowedValue<'_>],
 ) -> Result<(), GatewayError> {
     use std::hash::Hasher;
 
-    let max_session_tool_calls = std::env::var("MAX_SESSION_TOOL_CALLS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(20);
+    let mut max_session_tool_calls = 20;
+    let mut max_identical_tool_calls = 5;
 
-    let max_identical_tool_calls = std::env::var("MAX_IDENTICAL_TOOL_CALLS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(5);
+    if let Some(cfg) = state.routing_state.client_configs.load().get(tenant_id) {
+        max_session_tool_calls = cfg.max_agent_loops as u32;
+        max_identical_tool_calls = cfg.max_identical_tool_calls as u32;
+    } else {
+        if let Some(env_max) = std::env::var("MAX_SESSION_TOOL_CALLS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            max_session_tool_calls = env_max;
+        }
+        if let Some(env_ident) = std::env::var("MAX_IDENTICAL_TOOL_CALLS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            max_identical_tool_calls = env_ident;
+        }
+    }
 
     let mut storm_hasher = ahash::AHasher::default();
     storm_hasher.write(session_id.as_bytes());
@@ -465,6 +478,8 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
         });
 
         let session_id = "test-session-oss";
@@ -483,7 +498,7 @@ mod tests {
                 }]
             });
             let bytes = serde_json::to_vec(&body).unwrap();
-            let res = enforce_oss_agent_guardian(&state, session_id, &bytes).await;
+            let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &bytes).await;
             assert!(res.is_ok(), "Valid progression failed on iteration {}", i);
         }
 
@@ -502,10 +517,10 @@ mod tests {
         let loop_bytes = serde_json::to_vec(&loop_body).unwrap();
 
         for _ in 1..=5 {
-            let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+            let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
             assert!(res.is_ok());
         }
-        let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentRunawayLoop(_))));
 
         // Test 3 (Tool Storm)
@@ -526,12 +541,12 @@ mod tests {
             }]
         });
         let storm_bytes = serde_json::to_vec(&storm_body).unwrap();
-        let res = enforce_oss_agent_guardian(&state, session_id_storm, &storm_bytes).await;
+        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id_storm, &storm_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentToolStorm(_))));
 
         // Test 4 (Time Window Decay)
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(res.is_ok(), "Cache did not expire");
     }
 }

@@ -131,6 +131,11 @@ pub async fn chat_completions(
 
     // Delegate to proxy use-case. body_bytes may be schema-stripped (Phase 2).
     // ZERO-COPY: raw_prompt removed — proxy receives &body_bytes directly.
+    let mut extensions = extensions;
+    if let Some(lc) = agentic_ctx.loop_count {
+        extensions.insert(lc);
+    }
+
     let result = proxy::execute_proxy(
         &state,
         &agentic_ctx.body_bytes,

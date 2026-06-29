@@ -234,6 +234,8 @@ async fn main() {
         tool_registry,
         agent_guardian_cache,
         dashboard_metrics,
+        pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+        budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
     });
 
     // ── Start Port-based background workers ───────────────────────────────────
@@ -243,7 +245,7 @@ async fn main() {
 
     state
         .routing_config
-        .start_subscriber(state.routing_state.clone());
+        .start_subscriber(state.routing_state.clone(), state.mcp_registry.clone());
 
     // ── Server ────────────────────────────────────────────────────────────────
     let app: Router = api::routes::create_router(state);

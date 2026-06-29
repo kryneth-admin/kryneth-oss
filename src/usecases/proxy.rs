@@ -232,6 +232,10 @@ async fn get_client_config(state: &Arc<AppState>, tenant_id: &str) -> ClientConf
         preferred_model: None,
         fallback_timeout_ms: 30000,
         semantic_cache_threshold: 0.85,
+        max_agent_loops: 20,
+        max_identical_tool_calls: 5,
+        context_window_budget: 128000,
+        burn_rate_limit: 10.0,
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -248,6 +252,11 @@ pub async fn execute_proxy(
     enable_compression: bool,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
+
+    let claims = req_extensions.get::<crate::api::middleware::auth::Claims>();
+    let team_id = claims.and_then(|c| c.team_id.clone());
+    let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
+    let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
 
     // High-load Content Bypass:
     // If request payload is > 5MB, bypass PII checking, compliance, loop checks, and cache lookup,
@@ -281,11 +290,20 @@ pub async fn execute_proxy(
 
         let provider_name = prep.primary_target.provider_name.clone();
         let target_model = prep.primary_target.target_model.clone();
-        let target_rate =
-            crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model);
+        let pricing_guard = state.pricing_map.load();
+        let target_rate = pricing_guard.get(&target_model)
+            .or(pricing_guard.get(model_name))
+            .copied()
+            .unwrap_or_else(|| {
+                crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model)
+            });
 
-        if !is_free_tier && target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
-            return Err(crate::error::GatewayError::InsufficientFunds);
+        if !is_free_tier {
+            state.billing.enforce_scoped_budget(tenant_id, team_id.as_deref(), api_key_alias.as_deref(), model_name).await?;
+
+            if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
+                return Err(crate::error::GatewayError::InsufficientFunds);
+            }
         }
 
         let (upstream_response, success_key_alias, is_hot_swapped, prep) =
@@ -347,6 +365,9 @@ pub async fn execute_proxy(
                 is_free_tier,
                 None, // embedding
                 false, // cache_enabled
+                team_id,
+                api_key_alias,
+                agent_loops,
             );
         } else {
             return handle_buffered_response(
@@ -368,6 +389,7 @@ pub async fn execute_proxy(
                 None,
                 false,
                 enable_compression,
+                req_extensions,
             ).await;
         }
     }
@@ -376,6 +398,7 @@ pub async fn execute_proxy(
 
     crate::usecases::behavior_guard::enforce_oss_agent_guardian(
         state,
+        tenant_id,
         &trace_ctx.session_id,
         body_bytes,
     )
@@ -441,6 +464,9 @@ pub async fn execute_proxy(
             is_streaming,
             is_free_tier,
             client_config.semantic_cache_enabled,
+            team_id,
+            api_key_alias,
+            agent_loops,
         );
     }
 
@@ -522,6 +548,9 @@ pub async fn execute_proxy(
             is_streaming,
             is_free_tier,
             client_config.semantic_cache_enabled,
+            team_id,
+            api_key_alias,
+            agent_loops,
         );
     }
 
@@ -669,11 +698,20 @@ pub async fn execute_proxy(
 
     let provider_name = prep.primary_target.provider_name.clone();
     let target_model = prep.primary_target.target_model.clone();
-    let target_rate =
-        crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model);
+    let pricing_guard = state.pricing_map.load();
+    let target_rate = pricing_guard.get(&target_model)
+        .or(pricing_guard.get(model_name))
+        .copied()
+        .unwrap_or_else(|| {
+            crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model)
+        });
 
-    if !is_free_tier && target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
-        return Err(crate::error::GatewayError::InsufficientFunds);
+    if !is_free_tier {
+        state.billing.enforce_scoped_budget(tenant_id, team_id.as_deref(), api_key_alias.as_deref(), model_name).await?;
+
+        if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
+            return Err(crate::error::GatewayError::InsufficientFunds);
+        }
     }
 
     let (upstream_response, success_key_alias, is_hot_swapped, prep) =
@@ -730,6 +768,9 @@ pub async fn execute_proxy(
             is_free_tier,
             embedding_vector,
             client_config.semantic_cache_enabled,
+            team_id,
+            api_key_alias,
+            agent_loops,
         );
     }
 
@@ -753,6 +794,7 @@ pub async fn execute_proxy(
         embedding_vector,
         client_config.semantic_cache_enabled,
         enable_compression,
+        req_extensions,
     )
     .await
 }
@@ -773,6 +815,9 @@ fn handle_cache_hit(
     is_streaming: bool,
     is_free_tier: bool,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    agent_loops: u32,
 ) -> Result<ProxyResult, GatewayError> {
     let latency_ms = start_time.elapsed().as_millis() as u32;
     let requested_provider = get_requested_provider(state, tenant_id, model_name);
@@ -796,6 +841,10 @@ fn handle_cache_hit(
         is_free_tier,
         None,
         semantic_cache_enabled,
+        team_id,
+        api_key_alias,
+        0,
+        agent_loops,
     );
 
     if is_streaming {
@@ -912,6 +961,9 @@ fn handle_streaming_response(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    agent_loops: u32,
 ) -> Result<ProxyResult, GatewayError> {
     let state_stream = state.clone();
     let state_telemetry = state.clone();
@@ -923,6 +975,8 @@ fn handle_streaming_response(
     let embedding_vector_c = embedding_vector.clone();
     let body_bytes_stream = body_bytes.clone();
     let requested_provider_c = requested_provider.clone();
+    let team_id_c = team_id.clone();
+    let api_key_alias_c = api_key_alias.clone();
 
     let shared_executed_provider = std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
     let shared_success_key_alias = std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
@@ -1146,6 +1200,10 @@ fn handle_streaming_response(
             is_free_tier,
             embedding_vector_c,
             semantic_cache_enabled,
+            team_id_c,
+            api_key_alias_c,
+            0,
+            agent_loops,
         )
         .await;
     });
@@ -1180,6 +1238,7 @@ async fn handle_buffered_response(
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
     enable_compression: bool,
+    req_extensions: &axum::http::Extensions,
 ) -> Result<ProxyResult, GatewayError> {
     let mut body_bytes = upstream_response
         .bytes()
@@ -1236,6 +1295,7 @@ async fn handle_buffered_response(
     // This block is a no-op when:
     //   • `body_bytes` contains no `tool_calls` key (byte-scan early-exit)
     //   • `mcp_registry` is empty (pre-fetching disabled)
+    let mut mcp_calls = 0;
     {
         let has_tool_calls_bytes = body_bytes
             .windows(b"tool_calls".len())
@@ -1247,6 +1307,8 @@ async fn handle_buffered_response(
             if !calls.is_empty() {
                 let results =
                     crate::infrastructure::mcp_client::fan_out(calls, tenant_id, state, enable_compression).await;
+
+                mcp_calls = results.len() as u32;
 
                 if !results.is_empty() {
                     let tool_messages = crate::infrastructure::mcp_client::merge_results(results, enable_compression);
@@ -1272,6 +1334,11 @@ async fn handle_buffered_response(
             estimated_tokens + estimated_completion
         });
 
+    let claims = req_extensions.get::<crate::api::middleware::auth::Claims>();
+    let team_id = claims.and_then(|c| c.team_id.clone());
+    let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
+    let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
+
     spawn_telemetry(
         state,
         tenant_id,
@@ -1291,6 +1358,10 @@ async fn handle_buffered_response(
         is_free_tier,
         embedding_vector,
         semantic_cache_enabled,
+        team_id,
+        api_key_alias,
+        mcp_calls,
+        agent_loops,
     );
 
     Ok(ProxyResult {
@@ -1324,6 +1395,10 @@ fn spawn_telemetry(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    mcp_calls: u32,
+    agent_loops: u32,
 ) {
     let s = state.clone();
     let tid = tenant_id.to_string();
@@ -1332,6 +1407,8 @@ fn spawn_telemetry(
     let sem_text = semantic_text.to_string();
     let ctx = trace_ctx.clone();
     let vec = embedding_vector;
+    let team_id_c = team_id;
+    let api_key_alias_c = api_key_alias;
 
     tokio::spawn(async move {
         fire_async_telemetry(
@@ -1353,6 +1430,10 @@ fn spawn_telemetry(
             is_free_tier,
             vec,
             semantic_cache_enabled,
+            team_id_c,
+            api_key_alias_c,
+            mcp_calls,
+            agent_loops,
         )
         .await;
     });
@@ -1379,6 +1460,10 @@ async fn fire_async_telemetry(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    mcp_calls: u32,
+    agent_loops: u32,
 ) {
     state
         .dashboard_metrics
@@ -1395,10 +1480,14 @@ async fn fire_async_telemetry(
     let payload = json!({
         "id": uuid::Uuid::new_v4().to_string(),
         "tenant_id": tenant_id,
+        "team_id": team_id,
+        "api_key_alias": api_key_alias,
         "status": status_code,
         "latency_ms": latency_ms,
         "model": model_name,
         "tokens": tokens,
+        "mcp_calls": mcp_calls,
+        "agent_loops": agent_loops,
         "requested_provider": requested_provider,
         "executed_provider": executed_provider,
         "is_hot_swapped": is_hot_swapped
@@ -1412,10 +1501,14 @@ async fn fire_async_telemetry(
         "session_id":      trace_ctx.session_id,
         "parent_trace_id": trace_ctx.parent_trace_id,
         "tenant_id":       tenant_id,
+        "team_id":         team_id,
+        "api_key_alias":   api_key_alias,
         "model":           model_name,
         "status":          status_code,
         "latency_ms":      latency_ms,
         "total_tokens":    tokens,
+        "mcp_calls":       mcp_calls,
+        "agent_loops":     agent_loops,
         "cache_hit":       cache_hit,
         "prompt_content":  raw_prompt,
         "response_content": response_content,
@@ -1512,10 +1605,14 @@ async fn fire_async_telemetry(
             state,
             trace_ctx.trace_id.clone(),
             tenant_id.to_string(),
+            team_id,
+            api_key_alias,
             &executed_provider,
             model_name,
             prompt_tokens,
             completion_tokens,
+            mcp_calls,
+            agent_loops,
             cache_hit,
             is_free_tier,
         );
@@ -1527,10 +1624,14 @@ pub fn process_runtime_billing_telemetry(
     state: &Arc<AppState>,
     trace_id: String,
     tenant_id: String,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
     provider: &str,
     target_model: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    mcp_calls: u32,
+    agent_loops: u32,
     is_cache_hit: bool,
     is_free_tier: bool,
 ) -> Result<(), GatewayError> {
@@ -1543,10 +1644,14 @@ pub fn process_runtime_billing_telemetry(
             .process_billing_telemetry(
                 &trace_id,
                 &tenant_id,
+                team_id.as_deref(),
+                api_key_alias.as_deref(),
                 &provider,
                 &target_model,
                 prompt_tokens,
                 completion_tokens,
+                mcp_calls,
+                agent_loops,
                 is_cache_hit,
                 is_free_tier,
             )
@@ -1975,6 +2080,8 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
         };
 
         (Arc::new(state), mock_server)

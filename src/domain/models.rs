@@ -51,6 +51,10 @@ pub struct AppState {
     pub agent_guardian_cache: moka::future::Cache<String, u32>,
     /// Ephemeral Admin Dashboard in-memory metrics.
     pub dashboard_metrics: std::sync::Arc<DashboardMetrics>,
+    /// Dynamic pricing map for dynamic token & tool pricing rules
+    pub pricing_map: std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, crate::domain::billing::PrecautionaryRate>>>,
+    /// Dynamic budgets mapped by scope identifier
+    pub budget_map: std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, ScopedBudget>>>,
 }
 
 #[derive(Debug)]
@@ -149,6 +153,10 @@ pub struct ClientConfig {
     pub preferred_model: Option<String>,
     pub fallback_timeout_ms: i32,
     pub semantic_cache_threshold: f64,
+    pub max_agent_loops: i32,
+    pub max_identical_tool_calls: i32,
+    pub context_window_budget: i32,
+    pub burn_rate_limit: f64,
 }
 
 #[derive(Default)]
@@ -228,6 +236,28 @@ pub struct KrynethConversation {
 
 pub type StandardResponse = serde_json::Value;
 pub type StandardStreamChunk = String;
+
+/// Scopes under which budgets can be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetScopeType {
+    Global,
+    Tenant,
+    Team,
+    ApiKey,
+    Route,
+}
+
+/// Dynamic hierarchical scoped budget definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedBudget {
+    pub scope_type: BudgetScopeType,
+    pub scope_id: String,
+    pub limit_amount: f64,
+    pub alert_80_enabled: bool,
+    pub alert_100_projected_enabled: bool,
+    pub emergency_kill_switch: bool,
+}
 
 // ==============================================================================
 // Virtual API Key Phase 1: Multi-LLM Architecture Models
