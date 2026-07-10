@@ -1,0 +1,105 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Kryneth Gateway",
+  "colors": {
+    "primary": "#000000",
+    "light": "#ffffff",
+    "dark": "#0f0f0f"
+  },
+  "favicon": "/favicon.svg",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Overview",
+        "pages": [
+          "docs/overview/introduction",
+          "docs/overview/architecture",
+          "docs/overview/security-model"
+        ]
+      },
+      {
+        "group": "Getting Started",
+        "pages": [
+          "docs/getting-started/quickstart",
+          "docs/getting-started/docker-setup",
+          "docs/getting-started/local-stack-setup",
+          "docs/getting-started/microservice-launcher",
+          "docs/getting-started/operational-guide"
+        ]
+      },
+      {
+        "group": "Features",
+        "pages": [
+          "docs/features/agentic-firewall",
+          "docs/features/semantic-caching",
+          "docs/features/mcp-router",
+          "docs/features/pii-and-residency-compliance",
+          "docs/features/ema-latency-routing"
+        ]
+      },
+      {
+        "group": "Integrations",
+        "pages": [
+          "docs/integrations/sdks",
+          "docs/integrations/llm-providers"
+        ]
+      },
+      {
+        "group": "Deployment & Edge",
+        "pages": [
+          "docs/deployment-and-edge/kubernetes",
+          "docs/deployment-and-edge/cloud-run",
+          "docs/deployment-and-edge/edge-deployment"
+        ]
+      },
+      {
+        "group": "Kryneth Editions",
+        "pages": [
+          "docs/editions/oss/standalone-mode",
+          "docs/editions/oss/in-memory-adapters",
+          "docs/editions/enterprise/billing-engine",
+          "docs/editions/enterprise/rbac-auth",
+          "docs/editions/enterprise/observability"
+        ]
+      },
+      {
+        "group": "Benchmarks & Tuning",
+        "pages": [
+          "docs/benchmarks/load-test-results",
+          "docs/benchmarks/os-kernel-tuning"
+        ]
+      },
+      {
+        "group": "API Reference",
+        "pages": [
+          "docs/api-reference/enterprise-headers",
+          "docs/api-reference/endpoints"
+        ]
+      },
+      {
+        "group": "Changelog",
+        "pages": [
+          "docs/changelog/releases"
+        ]
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/kryneth/kryneth-oss"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get Enterprise",
+      "href": "https://kryneth.tech/enterprise"
+    }
+  }
+}

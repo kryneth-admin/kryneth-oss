@@ -1,6 +1,5 @@
 //! infrastructure/llm_router.rs — Dynamic Multi-LLM Router with Automated Fallback
 
-
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -105,18 +104,19 @@ pub fn extract_model_fast(body_bytes: &mut [u8]) -> Result<String, GatewayError>
                 }
             }
             if i < after_key.len() {
-                let model_str = std::str::from_utf8(&after_key[start..i])
-                    .map_err(|_| GatewayError::InvalidJSON("Invalid UTF-8 in model name".to_string()))?;
+                let model_str = std::str::from_utf8(&after_key[start..i]).map_err(|_| {
+                    GatewayError::InvalidJSON("Invalid UTF-8 in model name".to_string())
+                })?;
                 return Ok(model_str.trim().to_string());
             }
         }
     }
-    
+
     if body_bytes.len() > 5 * 1024 * 1024 {
         // High load pass-through: if > 5MB and model key not found in prefix, return error
         return Err(GatewayError::MissingModel);
     }
-    
+
     // Fallback for smaller cases
     #[derive(serde::Deserialize)]
     struct ExtractModel<'a> {
@@ -352,8 +352,7 @@ pub async fn route_chat_completion_with_fallback(
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let prep =
-        prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy).await?;
+    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
@@ -376,10 +375,9 @@ pub fn build_provider_request(
         struct ExtractStream {
             stream: Option<bool>,
         }
-        let extracted_stream =
-            simd_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
-                GatewayError::ResponseBuild(format!("Invalid JSON body for stream check: {}", e))
-            })?;
+        let extracted_stream = simd_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
+            GatewayError::ResponseBuild(format!("Invalid JSON body for stream check: {}", e))
+        })?;
         let is_stream = extracted_stream.stream.unwrap_or(false);
         if is_stream {
             format!(
@@ -699,8 +697,12 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
-            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
-            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         };
 
         (Arc::new(state), mock_server)
@@ -905,15 +907,10 @@ mod tests {
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
-        let prep = prep_upstream_request(
-            &state,
-            "t1",
-            &mut body_mut,
-            "*/*",
-            RoutingStrategy::Default,
-        )
-        .await
-        .unwrap();
+        let prep =
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default)
+                .await
+                .unwrap();
 
         // 4. Verify: key-2 should have been selected as primary (prep.fallback_targets should be empty)
         assert_eq!(
@@ -961,15 +958,10 @@ mod tests {
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
-        let prep = prep_upstream_request(
-            &state,
-            "t1",
-            &mut body_mut,
-            "*/*",
-            RoutingStrategy::Default,
-        )
-        .await
-        .unwrap();
+        let prep =
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default)
+                .await
+                .unwrap();
         let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
 
         // 4. Verify: Breaker is now open for "fail-key" under tenant t1
@@ -1008,7 +1000,9 @@ mod tests {
         };
 
         // Case 1: Stream
-        let stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let stream_body = axum::body::Bytes::from(
+            r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#,
+        );
         let mut stream_body_mut = stream_body.to_vec();
         let builder_stream = build_provider_request(
             &client,
@@ -1028,7 +1022,9 @@ mod tests {
         );
 
         // Case 2: Non-stream
-        let non_stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let non_stream_body = axum::body::Bytes::from(
+            r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#,
+        );
         let mut non_stream_body_mut = non_stream_body.to_vec();
         let builder_non_stream = build_provider_request(
             &client,

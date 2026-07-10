@@ -125,7 +125,15 @@ pub async fn chat_completions(
 
     // Phase 1+2+loop-budget via AgenticOrchestrator (extracted from this handler).
     let agentic_ctx = crate::usecases::agentic_orchestrator::orchestrate(
-        &state, body_bytes, tenant_id, api_key, session_id, idem_key, is_agentic, &trace_ctx, enable_compression,
+        &state,
+        body_bytes,
+        tenant_id,
+        api_key,
+        session_id,
+        idem_key,
+        is_agentic,
+        &trace_ctx,
+        enable_compression,
     )
     .await?;
 
@@ -226,6 +234,70 @@ pub async fn get_routing_state(
     Ok(Json(
         json!({ "models": models, "tenant_id": claims.tenant_id }),
     ))
+}
+
+#[derive(serde::Deserialize)]
+pub struct TopUpPayload {
+    pub amount: f64,
+}
+
+/// POST /v1/admin/billing/top-up
+#[instrument(skip(state, claims, payload))]
+pub async fn top_up_wallet(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<TopUpPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    info!(tenant_id = %claims.tenant_id, amount = payload.amount, "top_up_wallet");
+
+    if payload.amount <= 0.0 {
+        return Err(GatewayError::DatabaseError(
+            "Amount must be greater than 0".into(),
+        ));
+    }
+
+    let tenant_id = claims.tenant_id.clone();
+    let amount = payload.amount;
+    info!(tenant_id = %tenant_id, amount = %amount, "Processing wallet top-up");
+
+    let client = state
+        .redis_client
+        .as_ref()
+        .ok_or_else(|| GatewayError::DatabaseError("Redis client is not configured".into()))?;
+
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| GatewayError::DatabaseError(e.to_string()))?;
+
+    let balance_key = format!("billing:tenant:{}:balance", tenant_id);
+
+    let new_balance: f64 = redis::cmd("INCRBYFLOAT")
+        .arg(&balance_key)
+        .arg(payload.amount)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e: redis::RedisError| GatewayError::DatabaseError(e.to_string()))?;
+
+    let update_event = serde_json::json!({
+        "tenant_id": tenant_id,
+        "type": "balance_update",
+        "new_balance": new_balance
+    });
+
+    use redis::AsyncCommands;
+    let _: () = conn
+        .publish(
+            "kryneth:billing_updates",
+            serde_json::to_string(&update_event).unwrap(),
+        )
+        .await
+        .map_err(|e: redis::RedisError| GatewayError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "new_balance": new_balance
+    })))
 }
 
 /// GET /v1/mcp/registry

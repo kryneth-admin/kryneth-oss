@@ -37,6 +37,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/dashboard", get(handlers::get_dashboard))
         .route("/metrics/live", get(handlers::get_live_metrics))
         .route("/routing-state", get(handlers::get_routing_state))
+        .route("/billing/top-up", post(handlers::top_up_wallet))
         // RBAC: Admin role required for ALL /v1/admin/* routes.
         // Applied before auth so Claims is already in extensions when it runs.
         .route_layer(axum::middleware::from_fn(require_admin))

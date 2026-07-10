@@ -324,12 +324,12 @@ Complete guides for every use case:
 
 | Guide | Purpose | Best For |
 |-------|---------|----------|
-| **[Getting Started](./docs/GETTING_STARTED.mdx)** | Installation & first request | New users, developers |
-| **[Configuration Reference](./docs/CONFIGURATION.md)** | All settings explained | Advanced setup, tuning |
-| **[Docker Hub Deployment](./docs/DOCKER_HUB.md)** | Cloud & production deployments | AWS, GCP, Kubernetes, ECS |
-| **[API Reference](./docs/API.md)** | Full API endpoint documentation | Integration & SDK building |
-| **[Troubleshooting](./docs/TROUBLESHOOTING.md)** | Common issues & solutions | Debugging problems |
-| **[Architecture Deep Dive](./docs/ARCHITECTURE.md)** | System design & internals | Contributors, advanced users |
+| **[Getting Started](./docs/getting-started/quickstart.mdx)** | Installation & first request | New users, developers |
+| **[Configuration Reference](./docs/getting-started/operational-guide.md)** | All settings explained | Advanced setup, tuning |
+| **[Docker Hub Deployment](./docs/getting-started/docker-setup.md)** | Cloud & production deployments | AWS, GCP, Kubernetes, ECS |
+| **[API Reference](./docs/api-reference/endpoints.md)** | Full API endpoint documentation | Integration & SDK building |
+| **[Troubleshooting](./docs/getting-started/operational-guide.md#4-troubleshooting-common-scenarios)** | Common issues & solutions | Debugging problems |
+| **[Architecture Deep Dive](./docs/overview/architecture.md)** | System design & internals | Contributors, advanced users |
 
 ### Setup Helpers
 

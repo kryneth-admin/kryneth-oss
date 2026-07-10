@@ -1,4 +1,4 @@
-//! infrastructure/mcp_client.rs — Tunnel 3 
+//! infrastructure/mcp_client.rs — Tunnel 3
 //!
 //! ## Architecture (Phase 4 upgrade)
 //! ```text
@@ -348,7 +348,9 @@ fn convert_to_toon(json_array: &Vec<serde_json::Value>) -> Result<String, &'stat
         return Ok("array[0]{}:".to_string());
     }
 
-    let first_obj = json_array[0].as_object().ok_or("First element is not an object")?;
+    let first_obj = json_array[0]
+        .as_object()
+        .ok_or("First element is not an object")?;
     let mut keys: Vec<&str> = first_obj.keys().map(|k| k.as_str()).collect();
     keys.sort();
 
@@ -382,7 +384,12 @@ fn convert_to_toon(json_array: &Vec<serde_json::Value>) -> Result<String, &'stat
     }
 
     let rows_str = rows.join(" \n ");
-    Ok(format!("array[{}]{{{}}}: \n {}", json_array.len(), keys_str, rows_str))
+    Ok(format!(
+        "array[{}]{{{}}}: \n {}",
+        json_array.len(),
+        keys_str,
+        rows_str
+    ))
 }
 
 /// Reads the MCP server response and extracts the `result.content[0].text`

@@ -159,7 +159,11 @@ pub async fn auth_middleware(
     if let Some(auth_header) = req.headers().get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if token.starts_with("re_live_") {
+                if token.starts_with("ke_live_")
+                    || token.starts_with("ke_test_")
+                    || token.starts_with("re_live_")
+                    || token.starts_with("re_test_")
+                {
                     token_opt = Some((token.to_string(), TokenKind::ApiKey));
                 } else {
                     token_opt = Some((
@@ -176,7 +180,11 @@ pub async fn auth_middleware(
     if token_opt.is_none() {
         if let Some(key_header) = req.headers().get("x-api-key") {
             if let Ok(token) = key_header.to_str() {
-                if token.starts_with("re_live_") {
+                if token.starts_with("ke_live_")
+                    || token.starts_with("ke_test_")
+                    || token.starts_with("re_live_")
+                    || token.starts_with("re_test_")
+                {
                     token_opt = Some((token.to_string(), TokenKind::ApiKey));
                 }
             }
@@ -329,14 +337,16 @@ async fn handle_jwt(
     })?;
 
     if claims.team_id.is_none() {
-        claims.team_id = req.headers()
+        claims.team_id = req
+            .headers()
             .get("x-team-id")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_string());
     }
 
     if claims.api_key_alias.is_none() {
-        claims.api_key_alias = req.headers()
+        claims.api_key_alias = req
+            .headers()
             .get("x-api-key-alias")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_string());
@@ -377,12 +387,14 @@ async fn handle_api_key(
         _ => AccountType::Solo,
     };
 
-    let team_id = req.headers()
+    let team_id = req
+        .headers()
         .get("x-team-id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string());
 
-    let api_key_alias = req.headers()
+    let api_key_alias = req
+        .headers()
         .get("x-api-key-alias")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim().to_string());

@@ -189,7 +189,8 @@ impl McpConnectionRegistry {
             }
         };
 
-        let registry: DashMap<String, (String, std::collections::HashMap<String, String>)> = DashMap::new();
+        let registry: DashMap<String, (String, std::collections::HashMap<String, String>)> =
+            DashMap::new();
         match serde_json::from_str::<std::collections::HashMap<String, String>>(&raw) {
             Ok(map) => {
                 let count = map.len();
@@ -236,7 +237,12 @@ impl McpConnectionRegistry {
             .map(|m| (m.call_count, m.total_latency_ms))
     }
 
-    pub fn update_server(&self, name: String, url: String, env_vars: std::collections::HashMap<String, String>) {
+    pub fn update_server(
+        &self,
+        name: String,
+        url: String,
+        env_vars: std::collections::HashMap<String, String>,
+    ) {
         self.registry.insert(name, (url, env_vars));
     }
 
@@ -255,7 +261,10 @@ impl McpConnectionRegistry {
         self.registry.get(tool_name).map(|r| r.value().0.clone())
     }
 
-    pub fn get_env_vars(&self, tool_name: &str) -> Option<std::collections::HashMap<String, String>> {
+    pub fn get_env_vars(
+        &self,
+        tool_name: &str,
+    ) -> Option<std::collections::HashMap<String, String>> {
         self.registry.get(tool_name).map(|r| r.value().1.clone())
     }
 
@@ -378,7 +387,10 @@ mod tests {
     fn make_registry(tools: &[(&str, &str)]) -> McpConnectionRegistry {
         let registry = DashMap::new();
         for (name, url) in tools {
-            registry.insert(name.to_string(), (url.to_string(), std::collections::HashMap::new()));
+            registry.insert(
+                name.to_string(),
+                (url.to_string(), std::collections::HashMap::new()),
+            );
         }
         McpConnectionRegistry {
             registry,

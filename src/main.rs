@@ -212,13 +212,19 @@ async fn main() {
     let semantic_cache: Arc<dyn crate::domain::ports::SemanticCachePort> =
         Arc::new(infrastructure::oss_adapters::OssSemanticCache);
 
+    let llm_api_base_url = None;
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).ok();
+
     let state = Arc::new(AppState {
         http_client: http_client.clone(),
         compliance_url,
         rate_limit_max,
         rate_limit_window,
         dashboard_url,
-        llm_api_base_url: None,
+        llm_api_base_url,
+        redis_client,
         telemetry,
         billing,
         auth_resolver,
@@ -234,8 +240,12 @@ async fn main() {
         tool_registry,
         agent_guardian_cache,
         dashboard_metrics,
-        pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
-        budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+        pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
+        budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
     });
 
     // ── Start Port-based background workers ───────────────────────────────────

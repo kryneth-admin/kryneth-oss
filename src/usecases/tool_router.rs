@@ -834,7 +834,9 @@ mod tests {
         });
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
+        let result = registry
+            .inject_lazy_summaries(&body_bytes, &arena, true)
+            .unwrap();
         let modified: Value = serde_json::from_slice(&result).unwrap();
 
         // jira_search — parameters kept under SAFE compression
@@ -859,7 +861,9 @@ mod tests {
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
         // false flag (default) should return None immediately (zero-copy pass-through)
-        assert!(registry.inject_lazy_summaries(&body_bytes, &arena, false).is_none());
+        assert!(registry
+            .inject_lazy_summaries(&body_bytes, &arena, false)
+            .is_none());
     }
 
     #[test]
@@ -881,10 +885,10 @@ mod tests {
         assert!(result.is_some());
         let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
         let tools = modified["tools"].as_array().unwrap();
-        
+
         // jira_search parameters kept under SAFE compression
         assert!(tools[0]["function"].get("parameters").is_some());
-        
+
         // phantom tool is injected
         let has_phantom = tools.iter().any(|t| {
             t.pointer("/function/name").and_then(|v| v.as_str()) == Some(PHANTOM_TOOL_NAME)
@@ -916,14 +920,23 @@ mod tests {
         let start = std::time::Instant::now();
         let result = registry.intercept_phantom_call(&response_bytes);
         let elapsed = start.elapsed();
-        
+
         assert!(result.is_some());
         let synthetic: Value = serde_json::from_slice(&result.unwrap()).unwrap();
-        assert_eq!(synthetic["choices"][0]["message"]["role"].as_str(), Some("tool"));
-        assert_eq!(synthetic["choices"][0]["message"]["tool_call_id"].as_str(), Some("call_001"));
-        
+        assert_eq!(
+            synthetic["choices"][0]["message"]["role"].as_str(),
+            Some("tool")
+        );
+        assert_eq!(
+            synthetic["choices"][0]["message"]["tool_call_id"].as_str(),
+            Some("call_001")
+        );
+
         // Ensure no external network is called (should be extremely low latency < 1ms)
-        assert!(elapsed.as_millis() < 50, "Interception should be sub-millisecond local operation");
+        assert!(
+            elapsed.as_millis() < 50,
+            "Interception should be sub-millisecond local operation"
+        );
     }
 
     #[test]
@@ -949,9 +962,11 @@ mod tests {
         });
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let arena = bumpalo::Bump::new();
-        let result = registry.inject_lazy_summaries(&body_bytes, &arena, true).unwrap();
+        let result = registry
+            .inject_lazy_summaries(&body_bytes, &arena, true)
+            .unwrap();
         let modified: Value = serde_json::from_slice(&result).unwrap();
-        
+
         // Under SAFE compression, parameters is kept.
         assert!(modified["tools"][0]["function"].get("parameters").is_some());
 
@@ -1009,7 +1024,7 @@ mod tests {
         let arena = bumpalo::Bump::new();
         let result = registry.inject_lazy_summaries(&body_bytes, &arena, true);
         assert!(result.is_some());
-        
+
         let modified: Value = serde_json::from_slice(&result.unwrap()).unwrap();
         let func = &modified["tools"][0]["function"];
         let params = func.get("parameters").unwrap();
@@ -1018,7 +1033,7 @@ mod tests {
         assert!(params.get("description").is_none());
         assert!(params.get("title").is_none());
         assert!(params.get("examples").is_none());
-        
+
         let query_prop = params.pointer("/properties/query").unwrap();
         assert!(query_prop.get("description").is_none());
         assert!(query_prop.get("title").is_none());
@@ -1031,9 +1046,17 @@ mod tests {
         assert_eq!(params["type"].as_str(), Some("object"));
         assert_eq!(query_prop["type"].as_str(), Some("string"));
         assert_eq!(project_prop["type"].as_str(), Some("string"));
-        assert_eq!(params["required"].as_array().unwrap()[0].as_str(), Some("query"));
         assert_eq!(
-            project_prop["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<&str>>(),
+            params["required"].as_array().unwrap()[0].as_str(),
+            Some("query")
+        );
+        assert_eq!(
+            project_prop["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<&str>>(),
             vec!["INFRA", "QA", "DEV"]
         );
     }

@@ -269,7 +269,8 @@ pub async fn execute_proxy(
             &mut pass_buffer,
             accept_header,
             strategy,
-        ).await?;
+        )
+        .await?;
 
         struct RequestExtensions<'a>(&'a axum::http::Extensions);
         impl<'a> RequestExtensions<'a> {
@@ -291,7 +292,8 @@ pub async fn execute_proxy(
         let provider_name = prep.primary_target.provider_name.clone();
         let target_model = prep.primary_target.target_model.clone();
         let pricing_guard = state.pricing_map.load();
-        let target_rate = pricing_guard.get(&target_model)
+        let target_rate = pricing_guard
+            .get(&target_model)
             .or(pricing_guard.get(model_name))
             .copied()
             .unwrap_or_else(|| {
@@ -299,7 +301,15 @@ pub async fn execute_proxy(
             });
 
         if !is_free_tier {
-            state.billing.enforce_scoped_budget(tenant_id, team_id.as_deref(), api_key_alias.as_deref(), model_name).await?;
+            state
+                .billing
+                .enforce_scoped_budget(
+                    tenant_id,
+                    team_id.as_deref(),
+                    api_key_alias.as_deref(),
+                    model_name,
+                )
+                .await?;
 
             if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
                 return Err(crate::error::GatewayError::InsufficientFunds);
@@ -335,7 +345,9 @@ pub async fn execute_proxy(
             if let Some(pos) = slice.windows(8).position(|w| w == b"\"stream\"") {
                 let after_key = &slice[pos + 8..];
                 let mut i = 0;
-                while i < after_key.len() && (after_key[i].is_ascii_whitespace() || after_key[i] == b':') {
+                while i < after_key.len()
+                    && (after_key[i].is_ascii_whitespace() || after_key[i] == b':')
+                {
                     i += 1;
                 }
                 i < after_key.len() && after_key[i..].starts_with(b"true")
@@ -363,7 +375,7 @@ pub async fn execute_proxy(
                 prep,
                 body_bytes.clone(),
                 is_free_tier,
-                None, // embedding
+                None,  // embedding
                 false, // cache_enabled
                 team_id,
                 api_key_alias,
@@ -390,7 +402,8 @@ pub async fn execute_proxy(
                 false,
                 enable_compression,
                 req_extensions,
-            ).await;
+            )
+            .await;
         }
     }
 
@@ -436,7 +449,7 @@ pub async fn execute_proxy(
     // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
     let (is_streaming, semantic_text) = {
         let lazy_parsed = simd_json::to_borrowed_value(&mut parse_buffer)
-                .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
         let is_stream = lazy_parsed
             .get("stream")
@@ -471,7 +484,9 @@ pub async fn execute_proxy(
     }
 
     // Step 1: Speculatively generate embedding if semantic text exists
-    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled && state.semantic_cache.is_enabled() {
+    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled
+        && state.semantic_cache.is_enabled()
+    {
         if let Some(ref sem_text) = semantic_text {
             match state.l1_cache.embed_client.embed(sem_text).await {
                 Ok(vec) => Some(vec),
@@ -582,7 +597,7 @@ pub async fn execute_proxy(
 
         // 2. Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
+            "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
             "status": 429_u16,
             "latency_ms": latency_ms,
@@ -609,7 +624,8 @@ pub async fn execute_proxy(
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
             "is_hot_swapped": 0_u8,
-            "error":           e.to_string()
+            "error":           e.to_string(),
+            "has_response":    false
         });
         state.telemetry.log_event(trace_payload);
 
@@ -630,7 +646,7 @@ pub async fn execute_proxy(
 
         // 2. Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
+            "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
             "status": 429_u16,
             "latency_ms": latency_ms,
@@ -657,7 +673,8 @@ pub async fn execute_proxy(
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
             "is_hot_swapped": 0_u8,
-            "error":           e.to_string()
+            "error":           e.to_string(),
+            "has_response":    false
         });
         state.telemetry.log_event(trace_payload);
 
@@ -699,7 +716,8 @@ pub async fn execute_proxy(
     let provider_name = prep.primary_target.provider_name.clone();
     let target_model = prep.primary_target.target_model.clone();
     let pricing_guard = state.pricing_map.load();
-    let target_rate = pricing_guard.get(&target_model)
+    let target_rate = pricing_guard
+        .get(&target_model)
         .or(pricing_guard.get(model_name))
         .copied()
         .unwrap_or_else(|| {
@@ -707,7 +725,15 @@ pub async fn execute_proxy(
         });
 
     if !is_free_tier {
-        state.billing.enforce_scoped_budget(tenant_id, team_id.as_deref(), api_key_alias.as_deref(), model_name).await?;
+        state
+            .billing
+            .enforce_scoped_budget(
+                tenant_id,
+                team_id.as_deref(),
+                api_key_alias.as_deref(),
+                model_name,
+            )
+            .await?;
 
         if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
             return Err(crate::error::GatewayError::InsufficientFunds);
@@ -978,9 +1004,12 @@ fn handle_streaming_response(
     let team_id_c = team_id.clone();
     let api_key_alias_c = api_key_alias.clone();
 
-    let shared_executed_provider = std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
-    let shared_success_key_alias = std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
-    let shared_is_hot_swapped = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(is_hot_swapped));
+    let shared_executed_provider =
+        std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
+    let shared_success_key_alias =
+        std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
+    let shared_is_hot_swapped =
+        std::sync::Arc::new(std::sync::atomic::AtomicU8::new(is_hot_swapped));
 
     let shared_executed_provider_c = shared_executed_provider.clone();
     let shared_success_key_alias_c = shared_success_key_alias.clone();
@@ -1007,7 +1036,10 @@ fn handle_streaming_response(
                     Ok(chunk) => {
                         // Check for error signatures
                         if has_error_signature(&chunk) {
-                            tracing::warn!("Detected error signature in streaming chunk from provider {}", current_provider);
+                            tracing::warn!(
+                                "Detected error signature in streaming chunk from provider {}",
+                                current_provider
+                            );
                             failed = true;
                             break;
                         }
@@ -1018,7 +1050,11 @@ fn handle_streaming_response(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Mid-stream connection error from provider {}: {}", current_provider, e);
+                        tracing::error!(
+                            "Mid-stream connection error from provider {}: {}",
+                            current_provider,
+                            e
+                        );
                         failed = true;
                         break;
                     }
@@ -1034,7 +1070,7 @@ fn handle_streaming_response(
             let mut fallback_succeeded = false;
             while let Some(target) = prep.fallback_targets.first().cloned() {
                 prep.fallback_targets.remove(0); // Consume this fallback
-                
+
                 tracing::info!(
                     model = %prep.model,
                     key_alias = %target.api_key_alias,
@@ -1067,7 +1103,7 @@ fn handle_streaming_response(
                         if resp.status().is_success() {
                             active_stream = resp.bytes_stream();
                             current_provider = config.id.clone();
-                            
+
                             // Update shared state for telemetry safely
                             if let Ok(mut p_guard) = shared_executed_provider.lock() {
                                 *p_guard = config.id.clone();
@@ -1076,9 +1112,11 @@ fn handle_streaming_response(
                                 *k_guard = target.api_key_alias.clone();
                             }
                             shared_is_hot_swapped.store(1, std::sync::atomic::Ordering::Relaxed);
-                            
+
                             fallback_succeeded = true;
-                            tracing::info!("Streaming failover: stitched fallback stream successfully");
+                            tracing::info!(
+                                "Streaming failover: stitched fallback stream successfully"
+                            );
                             break;
                         } else {
                             tracing::warn!("Streaming failover: fallback provider returned non-success status: {}", resp.status());
@@ -1179,7 +1217,8 @@ fn handle_streaming_response(
         let final_success_key_alias = shared_success_key_alias_c
             .lock()
             .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
-        let final_is_hot_swapped = shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
+        let final_is_hot_swapped =
+            shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
 
         fire_async_telemetry(
             &state_telemetry,
@@ -1305,13 +1344,21 @@ async fn handle_buffered_response(
             let calls = crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes);
 
             if !calls.is_empty() {
-                let results =
-                    crate::infrastructure::mcp_client::fan_out(calls, tenant_id, state, enable_compression).await;
+                let results = crate::infrastructure::mcp_client::fan_out(
+                    calls,
+                    tenant_id,
+                    state,
+                    enable_compression,
+                )
+                .await;
 
                 mcp_calls = results.len() as u32;
 
                 if !results.is_empty() {
-                    let tool_messages = crate::infrastructure::mcp_client::merge_results(results, enable_compression);
+                    let tool_messages = crate::infrastructure::mcp_client::merge_results(
+                        results,
+                        enable_compression,
+                    );
 
                     // Forward merged tool results to telemetry as structured context.
                     let ctx_payload = serde_json::json!({
@@ -1478,7 +1525,7 @@ async fn fire_async_telemetry(
 
     // 1. Clickhouse bulk batched payload
     let payload = json!({
-        "id": uuid::Uuid::new_v4().to_string(),
+        "id": trace_ctx.trace_id.clone(),
         "tenant_id": tenant_id,
         "team_id": team_id,
         "api_key_alias": api_key_alias,
@@ -1490,7 +1537,8 @@ async fn fire_async_telemetry(
         "agent_loops": agent_loops,
         "requested_provider": requested_provider,
         "executed_provider": executed_provider,
-        "is_hot_swapped": is_hot_swapped
+        "is_hot_swapped": is_hot_swapped,
+        "cache_hit": cache_hit
     });
 
     state.telemetry.log_event(payload);
@@ -1514,7 +1562,8 @@ async fn fire_async_telemetry(
         "response_content": response_content,
         "requested_provider": requested_provider,
         "executed_provider": executed_provider,
-        "is_hot_swapped": is_hot_swapped
+        "is_hot_swapped": is_hot_swapped,
+        "has_response":    cache_hit || !response_content.is_empty()
     });
 
     state.telemetry.log_event(trace_payload);
@@ -2039,7 +2088,9 @@ mod tests {
         assert!(has_error_signature(b"\"rate_limit\" exceeded"));
         assert!(has_error_signature(b"\"insufficient_funds\" in balance"));
         assert!(has_error_signature(b"\"billing_limit\" reached"));
-        assert!(!has_error_signature(b"this is a safe message with no issues"));
+        assert!(!has_error_signature(
+            b"this is a safe message with no issues"
+        ));
     }
 
     #[allow(clippy::uninit_assumed_init, invalid_value, unknown_lints)]
@@ -2080,8 +2131,12 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
-            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
-            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         };
 
         (Arc::new(state), mock_server)
@@ -2134,7 +2189,10 @@ mod tests {
         let primary_body = "data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\ndata: {\"error\": \"rate_limit\"}\n\n";
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(wiremock::matchers::header("Authorization", "Bearer sk-primary"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer sk-primary",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(primary_body))
             .mount(&mock_server)
             .await;
@@ -2143,16 +2201,22 @@ mod tests {
         let fallback_body = "data: {\"choices\": [{\"delta\": {\"content\": \" stitched world\"}}]}\n\ndata: [DONE]\n\n";
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(wiremock::matchers::header("Authorization", "Bearer sk-fallback"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer sk-fallback",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(fallback_body))
             .mount(&mock_server)
             .await;
 
-        let body = axum::body::Bytes::from(serde_json::json!({
-            "model": "test-model",
-            "stream": true,
-            "messages": [{"role": "user", "content": "hi"}]
-        }).to_string());
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "test-model",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
 
         let mut req_extensions = axum::http::Extensions::new();
         req_extensions.insert(100.0f64);
@@ -2174,7 +2238,9 @@ mod tests {
             false,
             &req_extensions,
             false,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let ProxyBody::Stream(body_stream) = result.body else {
             panic!("Expected streaming response body");
@@ -2189,8 +2255,16 @@ mod tests {
         }
 
         let output_str = String::from_utf8(body_bytes).unwrap();
-        assert!(output_str.contains(" stitched world"), "Output does not contain ' stitched world': {}", output_str);
-        assert!(!output_str.contains("rate_limit"), "Output incorrectly contains 'rate_limit': {}", output_str);
+        assert!(
+            output_str.contains(" stitched world"),
+            "Output does not contain ' stitched world': {}",
+            output_str
+        );
+        assert!(
+            !output_str.contains("rate_limit"),
+            "Output incorrectly contains 'rate_limit': {}",
+            output_str
+        );
     }
 
     #[tokio::test]
@@ -2204,18 +2278,16 @@ mod tests {
         tenant_map.insert(
             virtual_model_name.to_string(),
             crate::domain::models::ModelConfig {
-                targets: vec![
-                    crate::domain::models::UpstreamTarget {
-                        priority: 1,
-                        weight: 1,
-                        api_key_alias: "primary".into(),
-                        api_key: "sk-primary".to_string(),
-                        provider_name: "openai".into(),
-                        base_url: mock_server.uri(),
-                        target_model: "gpt-4".into(),
-                        schema_format: "openai".into(),
-                    },
-                ],
+                targets: vec![crate::domain::models::UpstreamTarget {
+                    priority: 1,
+                    weight: 1,
+                    api_key_alias: "primary".into(),
+                    api_key: "sk-primary".to_string(),
+                    provider_name: "openai".into(),
+                    base_url: mock_server.uri(),
+                    target_model: "gpt-4".into(),
+                    schema_format: "openai".into(),
+                }],
                 ..Default::default()
             },
         );
@@ -2271,9 +2343,14 @@ mod tests {
             false,
             &req_extensions,
             false,
-        ).await;
+        )
+        .await;
 
-        assert!(result.is_ok(), "High-load bypass did not skip PII check! Error: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "High-load bypass did not skip PII check! Error: {:?}",
+            result.err()
+        );
         let proxy_res = result.unwrap();
         assert_eq!(proxy_res.status, 200);
     }

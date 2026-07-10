@@ -53,13 +53,15 @@ pub async fn enforce_oss_agent_guardian(
                     if let Some(message) = first_choice.get("message") {
                         if let Some(tc) = message.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
+                                    .await;
                             }
                         }
                     } else if let Some(delta) = first_choice.get("delta") {
                         if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
+                                    .await;
                             }
                         }
                     }
@@ -478,8 +480,12 @@ mod tests {
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
-            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
-            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::HashMap::new())),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         });
 
         let session_id = "test-session-oss";
@@ -517,7 +523,8 @@ mod tests {
         let loop_bytes = serde_json::to_vec(&loop_body).unwrap();
 
         for _ in 1..=5 {
-            let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
+            let res =
+                enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
             assert!(res.is_ok());
         }
         let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
@@ -541,7 +548,8 @@ mod tests {
             }]
         });
         let storm_bytes = serde_json::to_vec(&storm_body).unwrap();
-        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id_storm, &storm_bytes).await;
+        let res =
+            enforce_oss_agent_guardian(&state, "test-tenant", session_id_storm, &storm_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentToolStorm(_))));
 
         // Test 4 (Time Window Decay)

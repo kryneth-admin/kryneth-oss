@@ -16,6 +16,7 @@ pub struct AppState {
     pub rate_limit_window: u32,
     pub dashboard_url: String,
     pub llm_api_base_url: Option<String>,
+    pub redis_client: Option<redis::Client>,
     // ── Dependency-inverted ports (OSS ↔ Enterprise swappable) ────────────────
     pub telemetry: Arc<dyn TelemetryPort>,
     pub billing: Arc<dyn BillingPort>,
@@ -52,9 +53,14 @@ pub struct AppState {
     /// Ephemeral Admin Dashboard in-memory metrics.
     pub dashboard_metrics: std::sync::Arc<DashboardMetrics>,
     /// Dynamic pricing map for dynamic token & tool pricing rules
-    pub pricing_map: std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, crate::domain::billing::PrecautionaryRate>>>,
+    pub pricing_map: std::sync::Arc<
+        arc_swap::ArcSwap<
+            std::collections::HashMap<String, crate::domain::billing::PrecautionaryRate>,
+        >,
+    >,
     /// Dynamic budgets mapped by scope identifier
-    pub budget_map: std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, ScopedBudget>>>,
+    pub budget_map:
+        std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, ScopedBudget>>>,
 }
 
 #[derive(Debug)]
