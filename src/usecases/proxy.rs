@@ -2116,6 +2116,7 @@ mod tests {
             rate_limit_window: 0,
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
+            redis_client: None,
             telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),

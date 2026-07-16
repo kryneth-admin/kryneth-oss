@@ -86,13 +86,86 @@ pub async fn enforce_oss_agent_guardian(
 
 struct UnifiedToolCall {
     pub name: String,
-    pub arguments_str: String,
+    pub semantic_hash: u64,
+}
+
+fn hash_borrowed_value(
+    val: &simd_json::BorrowedValue<'_>,
+    hasher: &mut ahash::AHasher,
+    depth: usize,
+) {
+    use std::hash::Hasher;
+
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        let fallback_str = serde_json::to_string(val).unwrap_or_default();
+        hasher.write(fallback_str.as_bytes());
+        return;
+    }
+
+    #[allow(unreachable_patterns)]
+    match val {
+        simd_json::BorrowedValue::Static(node) => match node {
+            simd_json::StaticNode::I64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64((*n as f64).to_bits());
+            }
+            simd_json::StaticNode::U64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64((*n as f64).to_bits());
+            }
+            simd_json::StaticNode::F64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64(n.to_bits());
+            }
+            simd_json::StaticNode::Bool(b) => {
+                hasher.write_u8(1);
+                hasher.write_u8(if *b { 1 } else { 0 });
+            }
+            simd_json::StaticNode::Null => {
+                hasher.write_u8(0);
+            }
+        },
+        simd_json::BorrowedValue::String(s) => {
+            hasher.write_u8(5);
+            hasher.write(s.as_bytes());
+        }
+        simd_json::BorrowedValue::Array(arr) => {
+            hasher.write_u8(6);
+            hasher.write_usize(arr.len());
+            for item in arr {
+                hash_borrowed_value(item, hasher, depth + 1);
+            }
+        }
+        simd_json::BorrowedValue::Object(obj) => {
+            hasher.write_u8(7);
+
+            // Order-Independent Hashing (XOR Combination)
+            let mut obj_hash = 0u64;
+            for (k, v) in obj.iter() {
+                let k_str: &str = k.as_ref();
+                if !["timestamp", "nonce", "uuid", "stream", "session_id", "time"].contains(&k_str)
+                {
+                    let mut kv_hasher = ahash::AHasher::default();
+                    kv_hasher.write(k_str.as_bytes());
+                    hash_borrowed_value(v, &mut kv_hasher, depth + 1);
+                    obj_hash ^= kv_hasher.finish();
+                }
+            }
+            hasher.write_u64(obj_hash);
+        }
+        _ => {
+            let fallback_str = serde_json::to_string(val).unwrap_or_default();
+            hasher.write(fallback_str.as_bytes());
+        }
+    }
 }
 
 impl UnifiedToolCall {
     /// Unifies tool calls from top AI agent ecosystems into a standard format.
     fn from_borrowed_value(tc: &simd_json::BorrowedValue<'_>) -> Option<Self> {
         use simd_json::prelude::*;
+        use std::hash::Hasher;
 
         if let Some(func) = tc.get("function") {
             // 1. OpenAI / Groq Format
@@ -101,13 +174,22 @@ impl UnifiedToolCall {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let args = func
-                .get("arguments")
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args_str = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+
+            let arena = bumpalo::Bump::new();
+            let mut_bytes = arena.alloc_slice_copy(args_str.as_bytes());
+            let parsed_val = match simd_json::to_borrowed_value(mut_bytes) {
+                Ok(val) => val,
+                Err(_) => simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+            };
+
+            let mut hasher = ahash::AHasher::default();
+            hash_borrowed_value(&parsed_val, &mut hasher, 0);
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else if let Some(func_call) = tc.get("functionCall") {
             // 2. Google Gemini Format
@@ -116,25 +198,44 @@ impl UnifiedToolCall {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let args = func_call
-                .get("args")
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args = func_call.get("args");
+
+            let mut hasher = ahash::AHasher::default();
+            if let Some(val) = args {
+                hash_borrowed_value(val, &mut hasher, 0);
+            } else {
+                hash_borrowed_value(
+                    &simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+                    &mut hasher,
+                    0,
+                );
+            }
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else if let Some(name_val) = tc.get("name") {
             // 3. Anthropic & Cohere Formats
             let name = name_val.as_str().unwrap_or("").to_string();
-            let args = tc
-                .get("input")
-                .or_else(|| tc.get("parameters"))
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args = tc.get("input").or_else(|| tc.get("parameters"));
+
+            let mut hasher = ahash::AHasher::default();
+            if let Some(val) = args {
+                hash_borrowed_value(val, &mut hasher, 0);
+            } else {
+                hash_borrowed_value(
+                    &simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+                    &mut hasher,
+                    0,
+                );
+            }
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else {
             None // Unsupported format
@@ -209,7 +310,7 @@ async fn enforce_oss_tool_calls(
         let mut loop_hasher = ahash::AHasher::default();
         loop_hasher.write(session_id.as_bytes());
         loop_hasher.write(unified_tool.name.as_bytes());
-        loop_hasher.write(unified_tool.arguments_str.as_bytes());
+        loop_hasher.write_u64(unified_tool.semantic_hash);
         let loop_key = loop_hasher.finish().to_string();
 
         let count = state.agent_guardian_cache.get(&loop_key).await.unwrap_or(0) + 1;
@@ -465,6 +566,7 @@ mod tests {
             rate_limit_window: 60,
             dashboard_url: String::new(),
             llm_api_base_url: None,
+            redis_client: None,
             telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
@@ -556,5 +658,102 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(res.is_ok(), "Cache did not expire");
+    }
+
+    #[test]
+    fn test_ephemeral_hash_evasion() {
+        let payload_base = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\": \"Paris\", \"timestamp\": \"2026-07-16T17:31:00Z\", \"nonce\": \"12345\"}"
+            }
+        });
+
+        let payload_mutated = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"timestamp\": \"2026-07-16T17:35:00Z\", \"location\": \"Paris\", \"nonce\": \"67890\"}"
+            }
+        });
+
+        let mut bytes_base = serde_json::to_vec(&payload_base).unwrap();
+        let parsed_base = simd_json::to_borrowed_value(&mut bytes_base).unwrap();
+        let tc_base = UnifiedToolCall::from_borrowed_value(&parsed_base).unwrap();
+
+        let mut bytes_mutated = serde_json::to_vec(&payload_mutated).unwrap();
+        let parsed_mutated = simd_json::to_borrowed_value(&mut bytes_mutated).unwrap();
+        let tc_mutated = UnifiedToolCall::from_borrowed_value(&parsed_mutated).unwrap();
+
+        assert_eq!(
+            tc_base.semantic_hash, tc_mutated.semantic_hash,
+            "Semantic hash must be identical when only ephemeral keys and ordering change"
+        );
+
+        // Mutating a stable key should yield a different hash
+        let payload_different = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\": \"Berlin\", \"timestamp\": \"2026-07-16T17:31:00Z\", \"nonce\": \"12345\"}"
+            }
+        });
+        let mut bytes_diff = serde_json::to_vec(&payload_different).unwrap();
+        let parsed_diff = simd_json::to_borrowed_value(&mut bytes_diff).unwrap();
+        let tc_diff = UnifiedToolCall::from_borrowed_value(&parsed_diff).unwrap();
+        assert_ne!(
+            tc_base.semantic_hash, tc_diff.semantic_hash,
+            "Semantic hash must change when a stable key value changes"
+        );
+
+        // Numeric coercion verification (e.g. integer vs float)
+        let payload_int = serde_json::json!({
+            "function": {
+                "name": "set_threshold",
+                "arguments": "{\"value\": 5}"
+            }
+        });
+        let payload_float = serde_json::json!({
+            "function": {
+                "name": "set_threshold",
+                "arguments": "{\"value\": 5.0}"
+            }
+        });
+        let mut bytes_int = serde_json::to_vec(&payload_int).unwrap();
+        let parsed_int = simd_json::to_borrowed_value(&mut bytes_int).unwrap();
+        let tc_int = UnifiedToolCall::from_borrowed_value(&parsed_int).unwrap();
+
+        let mut bytes_float = serde_json::to_vec(&payload_float).unwrap();
+        let parsed_float = simd_json::to_borrowed_value(&mut bytes_float).unwrap();
+        let tc_float = UnifiedToolCall::from_borrowed_value(&parsed_float).unwrap();
+
+        assert_eq!(
+            tc_int.semantic_hash, tc_float.semantic_hash,
+            "Numeric values (5 vs 5.0) must coerce to equivalent hashes"
+        );
+
+        // Confirm "id" is NOT in the ephemeral blacklist
+        let payload_id1 = serde_json::json!({
+            "function": {
+                "name": "fetch",
+                "arguments": "{\"id\": 1}"
+            }
+        });
+        let payload_id2 = serde_json::json!({
+            "function": {
+                "name": "fetch",
+                "arguments": "{\"id\": 2}"
+            }
+        });
+        let mut bytes_id1 = serde_json::to_vec(&payload_id1).unwrap();
+        let parsed_id1 = simd_json::to_borrowed_value(&mut bytes_id1).unwrap();
+        let tc_id1 = UnifiedToolCall::from_borrowed_value(&parsed_id1).unwrap();
+
+        let mut bytes_id2 = serde_json::to_vec(&payload_id2).unwrap();
+        let parsed_id2 = simd_json::to_borrowed_value(&mut bytes_id2).unwrap();
+        let tc_id2 = UnifiedToolCall::from_borrowed_value(&parsed_id2).unwrap();
+
+        assert_ne!(
+            tc_id1.semantic_hash, tc_id2.semantic_hash,
+            "The 'id' field must not be stripped from hash payload"
+        );
     }
 }
