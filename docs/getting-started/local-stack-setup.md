@@ -1,3 +1,6 @@
+---
+icon: "terminal"
+---
 # Local Stack Setup & Onboarding
 
 Welcome to the Kryneth developer onboarding guide. This guide explains how to boot up and run the entire Kryneth L7 API Gateway and Policy Engine workspace locally.

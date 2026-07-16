@@ -1,3 +1,6 @@
+---
+icon: "book-open"
+---
 # Introduction to Kryneth
 
 Welcome to the primary documentation portal for the Kryneth Gateway. Kryneth is a high-performance, enterprise-grade L7 API gateway, security proxy, and compliance orchestration engine specifically designed to secure, route, and optimize Large Language Model (LLM) traffic.

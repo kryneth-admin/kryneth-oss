@@ -1,3 +1,6 @@
+---
+icon: "heading"
+---
 # Enterprise HTTP Headers Specification
 
 Kryneth Gateway leverages custom HTTP request and response headers to manage advanced features such as L7 routing control, tenant isolation, semantic caching verification, telemetry propagation, and circuit-breaker diagnostics.

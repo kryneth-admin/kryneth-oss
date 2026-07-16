@@ -1,3 +1,6 @@
+---
+icon: "cloud"
+---
 # Cloud Run & AWS ECS Container Deployments
 
 Deploy Kryneth Gateway to AWS ECS (Elastic Container Service) or Google Cloud Run for elastic, serverless scaling.

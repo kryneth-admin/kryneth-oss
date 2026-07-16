@@ -1,3 +1,6 @@
+---
+icon: "gauge"
+---
 # Load Testing Results
 
 This document presents the performance benchmarks of the Kryneth Gateway under high-concurrency stress environments. These results were gathered using the Kryneth Ephemeral Load Testing Pipeline (`make load-test`), which simulates realistic enterprise API request flows via k6.

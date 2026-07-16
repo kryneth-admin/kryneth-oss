@@ -1,3 +1,6 @@
+---
+icon: "fingerprint"
+---
 # PII Protection & Residency Compliance
 
 Autonomous AI agents frequently process sensitive user inputs. Without strict safety filters, agents can accidentally leak personally identifiable information (PII) to public third-party LLMs or store sensitive customer data across geographic borders, violating global regulations like **GDPR** or India's **DPDP**.

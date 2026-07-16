@@ -1,3 +1,6 @@
+---
+icon: "memory-stick"
+---
 # OSS In-Memory Adapters
 
 To guarantee frictionless developer onboarding and local stack testing, Kryneth OSS ships with memory-bound, transient state adapters. This avoids dependencies on external distributed databases or configuration caches.

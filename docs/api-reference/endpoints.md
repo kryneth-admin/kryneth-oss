@@ -1,3 +1,6 @@
+---
+icon: "link"
+---
 # API Endpoints Catalog
 
 Kryneth Gateway and its accompanying control plane services expose standard REST and gRPC interfaces for completions proxying, configuration, caching, and analytics tracking.

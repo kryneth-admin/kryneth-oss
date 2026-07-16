@@ -1,3 +1,6 @@
+---
+icon: "sparkles"
+---
 # Version Release History
 
 Track additions, changes, and safety updates introduced across Kryneth Gateway releases.

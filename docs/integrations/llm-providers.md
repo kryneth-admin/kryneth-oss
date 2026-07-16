@@ -1,3 +1,6 @@
+---
+icon: "cpu"
+---
 # Upstream LLM Providers
 
 Kryneth abstracts upstream LLM providers behind a virtual model translation layer. This allows you to hot-swap models and implement automatic failovers transparently.

@@ -1,3 +1,6 @@
+---
+icon: "shield-alert"
+---
 # Agentic Firewall (Behavior Guard)
 
 To prevent autonomous agents from running out of bounds, repeating failing actions, or triggering costly "tool storms," Kryneth acts as a behavior-aware firewall. It actively inspects outgoing tool executions and request velocities in real time.

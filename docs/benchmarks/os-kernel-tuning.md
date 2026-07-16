@@ -1,3 +1,6 @@
+---
+icon: "sliders"
+---
 # Operating System & Kernel Tuning Guide
 
 When deploying Kryneth Gateway or conducting high-intensity load tests locally (specifically using Windows Subsystem for Linux (WSL2) or raw Linux host environments), OS-level resource limits can become bottlenecks before the gateway pipeline itself saturates. 

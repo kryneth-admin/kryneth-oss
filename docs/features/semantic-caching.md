@@ -1,3 +1,6 @@
+---
+icon: "database"
+---
 # Hybrid L1/L2 Semantic Caching
 
 To reduce token charges and decrease response latency, Kryneth Gateway processes queries through a multi-tier semantic cache layer. Hits are returned in **~1.4ms** directly from memory.
@@ -34,8 +37,8 @@ To prevent cross-customer data leakage, all cache lookup and storage operations 
 ## 2. Adaptive Similarity Thresholds
 
 For semantic matches (computed via BAAI/bge-small-en-v1.5 embeddings), Kryneth dynamically sets cosine distance thresholds based on prompt length:
-*   **Short Prompts (<= 8 words)**: Evaluates with a strict distance threshold of **`< 0.06`** to prevent false-positive associations.
-*   **Longer Prompts (> 8 words)**: Evaluates with a relaxed distance threshold of **`< 0.14`**.
+*   **Short Prompts (less than or equal to 8 words)**: Evaluates with a strict distance threshold of `< 0.06` to prevent false-positive associations.
+*   **Longer Prompts (greater than 8 words)**: Evaluates with a relaxed distance threshold of `< 0.14`.
 
 ---
 

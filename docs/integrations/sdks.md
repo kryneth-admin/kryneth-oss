@@ -1,3 +1,6 @@
+---
+icon: "blocks"
+---
 # Drop-in SDK Client Integrations
 
 Kryneth operates as a drop-in reverse proxy for popular AI provider SDKs. This means you do not need to install custom client libraries; simply redirect existing OpenAI or Anthropic clients to Kryneth's endpoint port.

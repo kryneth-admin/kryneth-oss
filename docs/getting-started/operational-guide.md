@@ -1,3 +1,6 @@
+---
+icon: "settings"
+---
 # Operational Guide
 
 This guide provides operators and DevOps engineers with instructions to deploy, configure, monitor, and troubleshoot the Kryneth AI Gateway. Because Kryneth is built using a Hexagonal Architecture (Ports & Adapters), operational requirements change depending on whether you deploy the **OSS Gateway** (memory-bound) or the **Enterprise Engine** (database-bound).

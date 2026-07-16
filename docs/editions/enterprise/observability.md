@@ -1,3 +1,6 @@
+---
+icon: "eye"
+---
 # Observability & Analytics
 
 Observability is a first-class citizen inside Kryneth Gateway, designed to run asynchronously to ensure zero latency overhead on the request execution path.

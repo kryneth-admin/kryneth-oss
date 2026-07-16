@@ -1,3 +1,6 @@
+---
+icon: "box"
+---
 # Docker & Container Deployment
 
 Kryneth Gateway is packaged as a lightweight container available on Docker Hub for rapid testing and production-grade deployments.

@@ -1,3 +1,6 @@
+---
+icon: "globe"
+---
 # Edge Deployments (Fly.io & Cloudflare)
 
 Deploying Kryneth Gateway at the edge close to your agent clients reduces initial connection latencies and secures egress traffic efficiently.

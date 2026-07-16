@@ -1,3 +1,6 @@
+---
+icon: "shield-check"
+---
 # Security Model & Trust Boundaries
 
 At Kryneth, security is the foundational purpose of the product. Kryneth acts as a **Runtime Control Plane and Firewall** to protect enterprise infrastructure, API budgets, and data privacy from non-deterministic autonomous agents.

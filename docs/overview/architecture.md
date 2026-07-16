@@ -1,3 +1,6 @@
+---
+icon: "sitemap"
+---
 # Architecture & Core Proxy Pipeline
 
 Kryneth is a blazingly fast, ultra-low latency Rust service built with the Axum framework and Tokio runtime. It acts as an **Agent Runtime Control Plane**—an intelligent reverse proxy sitting between your AI Agents and upstream LLM providers to orchestrate security, compliance, observability, semantic caching, and strict budget enforcement at the edge.

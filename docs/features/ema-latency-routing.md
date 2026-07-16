@@ -1,3 +1,6 @@
+---
+icon: "activity"
+---
 # EMA Latency Routing
 
 In multi-tenant, high-traffic agent systems, routing requests to high-latency or degraded upstream model providers (e.g. during groq or Anthropic outages) severely hurts agent execution speeds. If a provider's P95 latency spikes, your agent workflow will lag, accumulating operational bottlenecks.

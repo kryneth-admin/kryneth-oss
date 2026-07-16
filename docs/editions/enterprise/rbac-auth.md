@@ -1,3 +1,6 @@
+---
+icon: "key"
+---
 # Authentication & RBAC Isolation
 
 Kryneth Enterprise implements multi-tenant security boundaries to isolate client workspaces, models, rate limits, and analytics.

@@ -1,3 +1,6 @@
+---
+icon: "play-circle"
+---
 # Microservice Launcher & Process Orchestration
 
 Kryneth Gateway is architectured as a suite of collaborative microservices alongside a React dashboard. To facilitate local velocity, the codebase provides an automated orchestration launcher script, `dev.sh`, that boots up the entire distributed application topology inside a single, unified terminal session.
