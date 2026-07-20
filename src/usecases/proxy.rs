@@ -165,7 +165,294 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
     }
 }
 
+/// Zero-copy PII scan target extractor.
+///
+/// Reads directly from raw JSON bytes without heap-copying the payload.
+/// Uses a byte-level state machine (same pattern as `extract_model_fast` and
+/// `rewrite_model_field` in `llm_router.rs`) to extract only text-type content
+/// nodes from user messages, explicitly skipping Base64 image blocks.
+///
+/// Output is capped at 64 KiB — the regex scan surface is always bounded
+/// regardless of total payload size (e.g., a 50 MB multimodal request).
+///
+/// Returns `None` when no extractable text exists (pure image / tool payload),
+/// which is treated as "no PII possible" and skips compliance redaction.
+fn extract_semantic_text_raw(body: &[u8]) -> Option<String> {
+    const BUDGET: usize = 64 * 1024;
+
+    #[inline]
+    fn skip_ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    fn parse_string(b: &[u8], i: usize) -> Option<(&[u8], usize)> {
+        if b.get(i) != Some(&b'"') {
+            return None;
+        }
+        let mut j = i + 1;
+        let mut esc = false;
+        while j < b.len() {
+            match (esc, b[j]) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => return Some((&b[i + 1..j], j + 1)),
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
+    fn skip_value(b: &[u8], start: usize) -> usize {
+        let i = skip_ws(b, start);
+        if i >= b.len() {
+            return b.len();
+        }
+        match b[i] {
+            b'"' => parse_string(b, i).map(|(_, e)| e).unwrap_or(b.len()),
+            b'[' | b'{' => {
+                let open = b[i];
+                let close = if open == b'[' { b']' } else { b'}' };
+                let mut depth = 1i32;
+                let mut j = i + 1;
+                while j < b.len() && depth > 0 {
+                    match b[j] {
+                        b'"' => {
+                            j = parse_string(b, j).map(|(_, e)| e).unwrap_or(j + 1);
+                            continue;
+                        }
+                        c if c == open => depth += 1,
+                        c if c == close => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                j
+            }
+            _ => {
+                let mut j = i;
+                while j < b.len()
+                    && !matches!(b[j], b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')
+                {
+                    j += 1;
+                }
+                j
+            }
+        }
+    }
+
+    fn find_key(b: &[u8], key: &[u8], start: usize, end: usize) -> Option<usize> {
+        let end = end.min(b.len());
+        let mut i = start;
+        while i < end {
+            if b[i] == b'"' {
+                let klen = key.len();
+                if i + klen + 2 <= end
+                    && b[i + 1..i + 1 + klen] == *key
+                    && b.get(i + 1 + klen) == Some(&b'"')
+                {
+                    let mut j = i + klen + 2;
+                    j = skip_ws(b, j);
+                    if b.get(j) == Some(&b':') {
+                        j += 1;
+                        j = skip_ws(b, j);
+                        return Some(j);
+                    }
+                }
+                if let Some((_, end_off)) = parse_string(b, i) {
+                    i = end_off;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    let len = body.len();
+    let mut out = String::new();
+
+    // Iterate through all JSON objects `{ ... }` in body
+    let mut i = 0;
+    while i < len && out.len() < BUDGET {
+        if body[i] == b'"' {
+            if let Some((_, end)) = parse_string(body, i) {
+                i = end;
+                continue;
+            }
+        }
+        if body[i] == b'{' {
+            let obj_start = i;
+            let mut depth = 1i32;
+            let mut j = i + 1;
+            while j < len && depth > 0 {
+                match body[j] {
+                    b'"' => {
+                        if let Some((_, end)) = parse_string(body, j) {
+                            j = end;
+                            continue;
+                        }
+                    }
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+
+            if depth == 0 {
+                let obj_bytes = &body[obj_start..j];
+                let obj_len = obj_bytes.len();
+
+                // Check if this object is a user message
+                let is_user_role = find_key(obj_bytes, b"role", 0, obj_len)
+                    .and_then(|voff| parse_string(obj_bytes, voff))
+                    .map(|(role_val, _)| role_val == b"user")
+                    .unwrap_or(false);
+
+                if is_user_role {
+                    // Extract "content" (OpenAI / Anthropic)
+                    if let Some(cv) = find_key(obj_bytes, b"content", 0, obj_len) {
+                        let cv = skip_ws(obj_bytes, cv);
+                        if cv < obj_len {
+                            match obj_bytes[cv] {
+                                b'"' => {
+                                    if let Some((raw, _)) = parse_string(obj_bytes, cv) {
+                                        if let Ok(text) = std::str::from_utf8(raw) {
+                                            out.push_str(text);
+                                            out.push('\n');
+                                        }
+                                    }
+                                }
+                                b'[' => {
+                                    let arr_end = skip_value(obj_bytes, cv);
+                                    let mut k = cv + 1;
+                                    while k < arr_end && out.len() < BUDGET {
+                                        k = skip_ws(obj_bytes, k);
+                                        if k >= arr_end || obj_bytes[k] == b']' {
+                                            break;
+                                        }
+                                        if obj_bytes[k] == b'{' {
+                                            let block_end = skip_value(obj_bytes, k);
+                                            let block_bytes = &obj_bytes[k..block_end];
+                                            let blen = block_bytes.len();
+
+                                            let is_text = find_key(block_bytes, b"type", 0, blen)
+                                                .and_then(|tv| parse_string(block_bytes, tv))
+                                                .map(|(t, _)| t == b"text")
+                                                .unwrap_or(true);
+
+                                            if is_text {
+                                                if let Some(tv) =
+                                                    find_key(block_bytes, b"text", 0, blen)
+                                                {
+                                                    if let Some((raw, _)) =
+                                                        parse_string(block_bytes, tv)
+                                                    {
+                                                        if let Ok(text) = std::str::from_utf8(raw) {
+                                                            out.push_str(text);
+                                                            out.push('\n');
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            k = block_end;
+                                        } else {
+                                            k = skip_value(obj_bytes, k);
+                                        }
+                                        k = skip_ws(obj_bytes, k);
+                                        if obj_bytes.get(k) == Some(&b',') {
+                                            k += 1;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Extract "parts" (Gemini)
+                    if let Some(pv) = find_key(obj_bytes, b"parts", 0, obj_len) {
+                        let pv = skip_ws(obj_bytes, pv);
+                        if obj_bytes.get(pv) == Some(&b'[') {
+                            let arr_end = skip_value(obj_bytes, pv);
+                            let mut k = pv + 1;
+                            while k < arr_end && out.len() < BUDGET {
+                                k = skip_ws(obj_bytes, k);
+                                if k >= arr_end || obj_bytes[k] == b']' {
+                                    break;
+                                }
+                                if obj_bytes[k] == b'{' {
+                                    let block_end = skip_value(obj_bytes, k);
+                                    let block_bytes = &obj_bytes[k..block_end];
+                                    let blen = block_bytes.len();
+                                    if let Some(tv) = find_key(block_bytes, b"text", 0, blen) {
+                                        if let Some((raw, _)) = parse_string(block_bytes, tv) {
+                                            if let Ok(text) = std::str::from_utf8(raw) {
+                                                out.push_str(text);
+                                                out.push('\n');
+                                            }
+                                        }
+                                    }
+                                    k = block_end;
+                                } else {
+                                    k = skip_value(obj_bytes, k);
+                                }
+                                k = skip_ws(obj_bytes, k);
+                                if obj_bytes.get(k) == Some(&b',') {
+                                    k += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Anthropic legacy: top-level "prompt" string (scan first 8 KiB only)
+    if out.trim().is_empty() {
+        if let Some(pv) = find_key(body, b"prompt", 0, len.min(8192)) {
+            let pv = skip_ws(body, pv);
+            if body.get(pv) == Some(&b'"') {
+                if let Some((raw, _)) = parse_string(body, pv) {
+                    if let Ok(prompt) = std::str::from_utf8(raw) {
+                        let text = if let Some(idx) = prompt.rfind("\n\nHuman:") {
+                            let s = &prompt[idx + "\n\nHuman:".len()..];
+                            s.find("\n\nAssistant:")
+                                .map(|e| s[..e].trim())
+                                .unwrap_or_else(|| s.trim())
+                        } else {
+                            prompt.trim()
+                        };
+                        if !text.is_empty() {
+                            out.push_str(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if out.len() > BUDGET {
+        out.truncate(BUDGET);
+    }
+
+    let trimmed = out.trim().to_string();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+
 /// Returns the leading/primary interrogative token in lowercase, if present.
+
 fn get_primary_interrogative(prompt: &str) -> Option<&'static str> {
     let strong_tokens = ["what", "who", "where", "when", "why", "how"];
     let weak_tokens = ["can", "is", "do", "does"];
@@ -258,154 +545,6 @@ pub async fn execute_proxy(
     let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
     let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
 
-    // High-load Content Bypass:
-    // If request payload is > 5MB, bypass PII checking, compliance, loop checks, and cache lookup,
-    // and stream directly to upstream targets.
-    if body_bytes.len() > 5 * 1024 * 1024 {
-        let mut pass_buffer = body_bytes.to_vec();
-        let prep = crate::infrastructure::llm_router::prep_upstream_request(
-            state,
-            tenant_id,
-            &mut pass_buffer,
-            accept_header,
-            strategy,
-        )
-        .await?;
-
-        struct RequestExtensions<'a>(&'a axum::http::Extensions);
-        impl<'a> RequestExtensions<'a> {
-            fn extensions(&self) -> &axum::http::Extensions {
-                self.0
-            }
-        }
-        let req = RequestExtensions(req_extensions);
-
-        let current_balance = match req.extensions().get::<f64>() {
-            Some(b) => *b,
-            None => {
-                return Err(crate::error::GatewayError::InternalError(
-                    "Billing context missing from request extensions".to_string(),
-                ))
-            }
-        };
-
-        let provider_name = prep.primary_target.provider_name.clone();
-        let target_model = prep.primary_target.target_model.clone();
-        let pricing_guard = state.pricing_map.load();
-        let target_rate = pricing_guard
-            .get(&target_model)
-            .or(pricing_guard.get(model_name))
-            .copied()
-            .unwrap_or_else(|| {
-                crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model)
-            });
-
-        if !is_free_tier {
-            state
-                .billing
-                .enforce_scoped_budget(
-                    tenant_id,
-                    team_id.as_deref(),
-                    api_key_alias.as_deref(),
-                    model_name,
-                )
-                .await?;
-
-            if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
-                return Err(crate::error::GatewayError::InsufficientFunds);
-            }
-        }
-
-        let (upstream_response, success_key_alias, is_hot_swapped, prep) =
-            crate::infrastructure::llm_router::execute_upstream_request(
-                state,
-                prep,
-                &mut pass_buffer,
-            )
-            .await?;
-
-        let requested_provider = provider_name.clone();
-        let executed_provider = requested_provider.clone();
-
-        let upstream_status = upstream_response.status().as_u16();
-        let content_type = upstream_response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
-
-        let raw_prompt = std::str::from_utf8(body_bytes)
-            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
-
-        // Fast check for stream without deserialization
-        let is_streaming = {
-            let scan_limit = body_bytes.len().min(8192);
-            let slice = &body_bytes[..scan_limit];
-            if let Some(pos) = slice.windows(8).position(|w| w == b"\"stream\"") {
-                let after_key = &slice[pos + 8..];
-                let mut i = 0;
-                while i < after_key.len()
-                    && (after_key[i].is_ascii_whitespace() || after_key[i] == b':')
-                {
-                    i += 1;
-                }
-                i < after_key.len() && after_key[i..].starts_with(b"true")
-            } else {
-                false
-            }
-        };
-
-        if is_streaming {
-            return handle_streaming_response(
-                state,
-                upstream_response,
-                upstream_status,
-                content_type,
-                tenant_id,
-                model_name,
-                raw_prompt,
-                "", // semantic_text
-                trace_ctx,
-                start_time,
-                requested_provider,
-                executed_provider,
-                is_hot_swapped,
-                success_key_alias,
-                prep,
-                body_bytes.clone(),
-                is_free_tier,
-                None,  // embedding
-                false, // cache_enabled
-                team_id,
-                api_key_alias,
-                agent_loops,
-            );
-        } else {
-            return handle_buffered_response(
-                state,
-                upstream_response,
-                upstream_status,
-                content_type,
-                tenant_id,
-                model_name,
-                raw_prompt,
-                "",
-                trace_ctx,
-                start_time,
-                requested_provider,
-                executed_provider,
-                is_hot_swapped,
-                success_key_alias,
-                is_free_tier,
-                None,
-                false,
-                enable_compression,
-                req_extensions,
-            )
-            .await;
-        }
-    }
 
     let client_config = get_client_config(state, tenant_id).await;
 
@@ -421,8 +560,16 @@ pub async fn execute_proxy(
     let raw_prompt: &str =
         std::str::from_utf8(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
-    // ── Stage 0: PII Redaction (fail-closed) ─────────────────────────────────
-    let is_pii_match = pii_regex().is_match(raw_prompt);
+    // ── Stage 0: PII Redaction (fail-closed, zero-copy scan) ─────────────────
+    // extract_semantic_text_raw reads body_bytes directly without .to_vec().
+    // The regex runs only on extracted text nodes (≤64 KiB), never on Base64
+    // image blobs. Pure-image payloads return None → is_pii_match = false.
+    let pii_scan_target = extract_semantic_text_raw(body_bytes);
+    let is_pii_match = pii_scan_target
+        .as_deref()
+        .map(|t| pii_regex().is_match(t))
+        .unwrap_or(false);
+
 
     let body_bytes = if is_pii_match {
         let parsed_body: Value = serde_json::from_slice(body_bytes)
@@ -685,15 +832,15 @@ pub async fn execute_proxy(
 
     // ── Stage 2 & 3: Dynamic Provider Key Resolution and Routing with Fallback ─
 
-    // [OBSERVABILITY] Log the raw payload being dispatched so we can verify the SIMD
-    // mutation output before it reaches the upstream provider.  Compiled out in release
-    // builds that use the `tracing::debug!` level — zero cost on the hot path.
+    // [OBSERVABILITY] Structural dispatch log — never dumps raw payload bytes so
+    // unredacted PII cannot leak into log aggregators via the debug pipeline.
     tracing::debug!(
         tenant_id = %tenant_id,
         model = %model_name,
-        raw_payload = %std::str::from_utf8(&body_bytes).unwrap_or(""),
+        payload_bytes = body_bytes.len(),
         "Dispatching payload to upstream LLM provider"
     );
+
 
     // ── Stage 1.9: Deferred Billing Balance Guard ────────────────────────────
     struct RequestExtensions<'a>(&'a axum::http::Extensions);
@@ -2269,44 +2416,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_high_load_bypass_large_payload() {
+    async fn test_large_payload_runs_pii_and_compliance() {
         let (state, mock_server) = setup_proxy_test_state().await;
-
-        let tenant_id = "test-tenant";
-        let virtual_model_name = "test-model";
-
-        let mut tenant_map = std::collections::HashMap::new();
-        tenant_map.insert(
-            virtual_model_name.to_string(),
-            crate::domain::models::ModelConfig {
-                targets: vec![crate::domain::models::UpstreamTarget {
-                    priority: 1,
-                    weight: 1,
-                    api_key_alias: "primary".into(),
-                    api_key: "sk-primary".to_string(),
-                    provider_name: "openai".into(),
-                    base_url: mock_server.uri(),
-                    target_model: "gpt-4".into(),
-                    schema_format: "openai".into(),
-                }],
-                ..Default::default()
-            },
-        );
-        let mut map = std::collections::HashMap::new();
-        map.insert(tenant_id.to_string(), tenant_map);
-        state.routing_state.state.store(Arc::new(map));
-
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
-
-        // Mock upstream response
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{"message": {"role": "assistant", "content": "Bypassed successfully"}}]
-            })))
-            .mount(&mock_server)
-            .await;
+        let tenant_id = "test-tenant-123";
 
         // Generate a large payload > 5MB that contains PII email pattern
         let pii_email = "test-email-address@domain.com";
@@ -2348,11 +2460,141 @@ mod tests {
         .await;
 
         assert!(
-            result.is_ok(),
-            "High-load bypass did not skip PII check! Error: {:?}",
-            result.err()
+            result.is_err(),
+            "Payload > 5MB MUST NOT bypass PII/compliance check"
         );
-        let proxy_res = result.unwrap();
-        assert_eq!(proxy_res.status, 200);
+        let err_str = format!("{:?}", result.err());
+        assert!(
+            err_str.contains("ComplianceFailure"),
+            "Expected ComplianceFailure since compliance was triggered for >5MB payload: got {}",
+            err_str
+        );
+    }
+
+
+    // ── extract_semantic_text_raw unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_raw_scanner_openai_string_content() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is my SSN 123-45-6789?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract user message text");
+        let text = result.unwrap();
+        assert!(
+            text.contains("SSN 123-45-6789"),
+            "must contain PII text: got {:?}",
+            text
+        );
+        assert!(
+            !text.contains("helpful assistant"),
+            "must NOT include system message"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_multimodal_skips_base64() {
+        let fake_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAUA".repeat(2000); // ~54 KB "image"
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image. My email is user@example.com"},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", fake_base64)}}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract text block");
+        let text = result.unwrap();
+        assert!(
+            text.contains("user@example.com"),
+            "must contain email PII: got {:?}",
+            text
+        );
+        assert!(
+            !text.contains("iVBORw0KGgo"),
+            "MUST NOT contain Base64 image data in scan target"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_pure_image_returns_none() {
+        // A payload with ONLY an image_url block — no text content at all.
+        // extract_semantic_text_raw must return None so pii_regex is never called.
+        let fake_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAUA".repeat(2000);
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", fake_base64)}}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(
+            result.is_none(),
+            "pure-image payload must return None — PII regex must not run on Base64 data"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_gemini_parts_format() {
+        let body = serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": "My Aadhaar is 1234 5678 9012"}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract Gemini parts text");
+        assert!(
+            result.unwrap().contains("1234 5678 9012"),
+            "must contain Aadhaar number"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_anthropic_legacy_prompt() {
+        let body = serde_json::json!({
+            "prompt": "\n\nHuman: Call me at +1 415-555-0100\n\nAssistant:"
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract Anthropic legacy prompt");
+        assert!(
+            result.unwrap().contains("+1 415-555-0100"),
+            "must contain phone number PII"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_64kb_budget_cap() {
+        // Build a user message text that is > 64 KiB
+        let long_text = "a".repeat(128 * 1024);
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": long_text}]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        // Must return Some but capped at ≤64 KiB
+        assert!(result.is_some());
+        assert!(
+            result.unwrap().len() <= 64 * 1024,
+            "output must be capped at 64 KiB"
+        );
     }
 }
