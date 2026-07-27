@@ -61,7 +61,7 @@ pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
 }
 
 fn is_retryable_error(status: u16) -> bool {
-    matches!(status, 401 | 403 | 429 | 500 | 502 | 503 | 504)
+    matches!(status, 401 | 403 | 404 | 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Circuit-breaker entries are scoped per tenant so aliases never collide across tenants.
@@ -311,6 +311,7 @@ pub async fn execute_upstream_request(
                 let status = response.status().as_u16();
                 if !is_retryable_error(status) {
                     // Fallback key succeeded — is_hot_swapped = 1
+                    prep.executed_provider = config.id.clone();
                     prep.fallback_targets.remove(0); // consume the one we just succeeded with so it's not reused
                     return Ok((response, target.api_key_alias.clone(), 1u8, prep));
                 }
@@ -382,10 +383,13 @@ pub fn build_provider_request(
         if is_stream {
             format!(
                 "{}/{}:streamGenerateContent?key={}",
-                base_url, model, api_key
+                base_url, upstream_target_model, api_key
             )
         } else {
-            format!("{}/{}:generateContent?key={}", base_url, model, api_key)
+            format!(
+                "{}/{}:generateContent?key={}",
+                base_url, upstream_target_model, api_key
+            )
         }
     } else {
         format!("{}/chat/completions", base_url)
@@ -546,9 +550,9 @@ mod tests {
     fn test_rewrite_model_field_produces_valid_json() {
         let input =
             r#"{"model": "my-prod-route", "messages": [{"role": "user", "content": "Hello"}]}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let result = rewrite_model_field(&mut bytes, "llama3-8b-8192");
+        let result = rewrite_model_field(&bytes, "llama3-8b-8192");
         assert!(
             result.is_ok(),
             "rewrite_model_field must not return an error: {:?}",
@@ -589,9 +593,9 @@ mod tests {
         // This is the regression test for the original serde_json::to_vec bug which
         // could corrupt numbers, booleans, and null values through simd-json's OwnedValue.
         let input = r#"{"model": "my-route", "temperature": 0.7, "max_tokens": 1024, "stream": true, "top_p": null}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "llama3-70b-8192").unwrap();
+        let output = rewrite_model_field(&bytes, "llama3-70b-8192").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(parsed["model"].as_str().unwrap(), "llama3-70b-8192");
@@ -621,9 +625,9 @@ mod tests {
         // The critical case: target model is LONGER than the virtual name.
         // A naive byte-splice approach would produce invalid JSON here.
         let input = r#"{"model": "gpt-4", "messages": []}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "llama3-70b-8192-tool-use-preview").unwrap();
+        let output = rewrite_model_field(&bytes, "llama3-70b-8192-tool-use-preview").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(
@@ -637,9 +641,9 @@ mod tests {
     fn test_rewrite_model_field_long_to_short_model_name() {
         // The reverse: target model is SHORTER than the virtual name.
         let input = r#"{"model": "my-very-long-virtual-route-name", "messages": []}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "gpt-4o").unwrap();
+        let output = rewrite_model_field(&bytes, "gpt-4o").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(
@@ -651,8 +655,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_model_field_invalid_json_returns_error() {
-        let mut bytes = b"not valid json {{{".to_vec();
-        let result = rewrite_model_field(&mut bytes, "some-model");
+        let bytes = b"not valid json {{{".to_vec();
+        let result = rewrite_model_field(&bytes, "some-model");
         assert!(
             result.is_err(),
             "rewrite_model_field must propagate simd-json parse errors"
@@ -987,7 +991,7 @@ mod tests {
         assert!(is_retryable_error(500), "500 should be retryable");
         assert!(!is_retryable_error(200), "200 should not be retryable");
         assert!(!is_retryable_error(400), "400 should not be retryable");
-        assert!(!is_retryable_error(404), "404 should not be retryable");
+        assert!(is_retryable_error(404), "404 should be retryable");
     }
 
     #[test]
@@ -1043,5 +1047,90 @@ mod tests {
             request_non_stream.url().as_str(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=test-gemini-key"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_upstream_request_falls_back_on_404() {
+        let (state, primary_server) = setup_test_state().await;
+        let fallback_server = MockServer::start().await;
+
+        // Primary returns 404 Not Found
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&primary_server)
+            .await;
+
+        // Fallback returns 200 OK
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-fallback",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Fallback response"}}]
+            })))
+            .mount(&fallback_server)
+            .await;
+
+        let tenant_id = "test-tenant-404";
+        let mut tenant_map = HashMap::new();
+        tenant_map.insert(
+            "gemini-1.5-flash".to_string(),
+            ModelConfig {
+                targets: vec![
+                    UpstreamTarget {
+                        priority: 1,
+                        weight: 100,
+                        api_key_alias: "primary_key".into(),
+                        api_key: "primary_secret".to_string(),
+                        provider_name: "gemini".into(),
+                        base_url: primary_server.uri(),
+                        target_model: "gemini-1.5-flash".to_string(),
+                        schema_format: "gemini".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 2,
+                        weight: 100,
+                        api_key_alias: "GROQ_API_KEY".into(),
+                        api_key: "groq_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: fallback_server.uri(),
+                        target_model: "gemini-1.5-flash".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "gemini-1.5-flash",
+                "messages": [{"role": "user", "content": "hello"}]
+            })
+            .to_string(),
+        );
+
+        let mut body_mut = body.to_vec();
+        let prep = prep_upstream_request(
+            &state,
+            tenant_id,
+            &mut body_mut,
+            "application/json",
+            RoutingStrategy::Default,
+        )
+        .await
+        .unwrap();
+
+        let (resp, success_key, hot_swapped, updated_prep) =
+            execute_upstream_request(&state, prep, &mut body_mut)
+                .await
+                .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(success_key, "GROQ_API_KEY");
+        assert_eq!(hot_swapped, 1);
+        assert_eq!(updated_prep.executed_provider, "openai");
     }
 }

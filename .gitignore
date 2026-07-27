@@ -5,6 +5,7 @@ Cargo.lock
 *.pdb
 .fastembed_cache/
 # Environment files
+.agent
 .env
 .env.local
 .env.*.local

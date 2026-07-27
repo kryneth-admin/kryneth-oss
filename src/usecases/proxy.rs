@@ -452,7 +452,6 @@ fn extract_semantic_text_raw(body: &[u8]) -> Option<String> {
 
 
 /// Returns the leading/primary interrogative token in lowercase, if present.
-
 fn get_primary_interrogative(prompt: &str) -> Option<&'static str> {
     let strong_tokens = ["what", "who", "where", "when", "why", "how"];
     let weak_tokens = ["can", "is", "do", "does"];
@@ -897,8 +896,8 @@ pub async fn execute_proxy(
 
     // requested_provider and executed_provider are both derived from the gateway's
     // own routing state — upstream providers never return these in response headers.
-    let requested_provider = provider_name.clone();
-    let executed_provider = requested_provider.clone();
+    let requested_provider = prep.requested_provider.clone();
+    let executed_provider = prep.executed_provider.clone();
 
     let upstream_status = upstream_response.status().as_u16();
     let content_type = upstream_response
@@ -1366,6 +1365,11 @@ fn handle_streaming_response(
             .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
         let final_is_hot_swapped =
             shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
+        let final_status = if final_is_hot_swapped == 1 {
+            200
+        } else {
+            upstream_status
+        };
 
         fire_async_telemetry(
             &state_telemetry,
@@ -1374,7 +1378,7 @@ fn handle_streaming_response(
             &raw_prompt_c,
             &semantic_text_c,
             &trace_ctx_c,
-            upstream_status,
+            final_status,
             latency_ms,
             total_tokens,
             false,
@@ -2417,7 +2421,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_payload_runs_pii_and_compliance() {
-        let (state, mock_server) = setup_proxy_test_state().await;
+        let (state, _mock_server) = setup_proxy_test_state().await;
         let tenant_id = "test-tenant-123";
 
         // Generate a large payload > 5MB that contains PII email pattern
