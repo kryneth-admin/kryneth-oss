@@ -6,9 +6,6 @@ use tracing::{error, info, warn};
 use crate::domain::models::{AppState, UpstreamTarget};
 use crate::error::GatewayError;
 use crate::infrastructure::routing_strategy::RoutingStrategy;
-use crate::infrastructure::translators::{
-    AnthropicTranslator, BaseTranslator, GeminiTranslator, OpenAiTranslator,
-};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthScheme {
@@ -30,14 +27,6 @@ pub struct ProviderConfig {
     pub base_url: String, // Kept for backwards compatibility but we use model_config.base_url
     pub auth_scheme: AuthScheme,
     pub schema_format: SchemaFormat,
-}
-
-pub fn get_translator(schema: &SchemaFormat) -> Box<dyn BaseTranslator> {
-    match schema {
-        SchemaFormat::OpenAI => Box::new(OpenAiTranslator),
-        SchemaFormat::Anthropic => Box::new(AnthropicTranslator),
-        SchemaFormat::Gemini => Box::new(GeminiTranslator),
-    }
 }
 
 pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
@@ -358,7 +347,7 @@ pub async fn route_chat_completion_with_fallback(
     Ok((resp, key, hot_swapped))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 pub fn build_provider_request(
     client: &reqwest::Client,
     config: &ProviderConfig,
@@ -420,19 +409,20 @@ pub fn build_provider_request(
     let request = if body_bytes.len() > 5 * 1024 * 1024 {
         request.body(body_bytes.to_vec())
     } else if config.schema_format != SchemaFormat::OpenAI {
-        use crate::infrastructure::translators::BaseTranslator;
-        let source_translator = crate::infrastructure::translators::OpenAiTranslator;
+        let source_adapter =
+            crate::infrastructure::providers::get_utp_adapter(&SchemaFormat::OpenAI);
 
-        let mut conv = source_translator.to_universal(body_bytes).map_err(|e| {
-            GatewayError::ResponseBuild(format!("Incoming translation failed: {}", e))
+        let mut conv = source_adapter.to_universal(body_bytes).map_err(|e| {
+            GatewayError::ResponseBuild(format!("Incoming translation failed: {e}"))
         })?;
 
         conv.model = Some(upstream_target_model.to_string());
 
-        let translator = get_translator(&config.schema_format);
-        let final_body = translator
+        let target_adapter =
+            crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
+        let final_body = target_adapter
             .from_universal(&conv)
-            .map_err(|e| GatewayError::ResponseBuild(format!("Translation error: {}", e)))?;
+            .map_err(|e| GatewayError::ResponseBuild(format!("Translation error: {e}")))?;
 
         request.json(&final_body)
     } else {
