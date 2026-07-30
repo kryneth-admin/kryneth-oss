@@ -343,6 +343,7 @@ impl L1Cache {
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

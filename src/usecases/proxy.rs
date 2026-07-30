@@ -450,7 +450,6 @@ fn extract_semantic_text_raw(body: &[u8]) -> Option<String> {
     }
 }
 
-
 /// Returns the leading/primary interrogative token in lowercase, if present.
 fn get_primary_interrogative(prompt: &str) -> Option<&'static str> {
     let strong_tokens = ["what", "who", "where", "when", "why", "how"];
@@ -544,7 +543,6 @@ pub async fn execute_proxy(
     let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
     let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
 
-
     let client_config = get_client_config(state, tenant_id).await;
 
     crate::usecases::behavior_guard::enforce_oss_agent_guardian(
@@ -568,7 +566,6 @@ pub async fn execute_proxy(
         .as_deref()
         .map(|t| pii_regex().is_match(t))
         .unwrap_or(false);
-
 
     let body_bytes = if is_pii_match {
         let parsed_body: Value = serde_json::from_slice(body_bytes)
@@ -839,7 +836,6 @@ pub async fn execute_proxy(
         payload_bytes = body_bytes.len(),
         "Dispatching payload to upstream LLM provider"
     );
-
 
     // ── Stage 1.9: Deferred Billing Balance Guard ────────────────────────────
     struct RequestExtensions<'a>(&'a axum::http::Extensions);
@@ -1438,9 +1434,9 @@ async fn handle_buffered_response(
     let latency_ms = start_time.elapsed().as_millis() as u32;
 
     let config = crate::infrastructure::llm_router::get_provider_config(&executed_provider);
-    let translator = crate::infrastructure::llm_router::get_translator(&config.schema_format);
+    let adapter = crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
     if let Ok(raw_json) = serde_json::from_slice::<Value>(&body_bytes) {
-        match translator.unify_response(raw_json) {
+        match adapter.unify_response(raw_json) {
             Ok(unified_json) => {
                 if let Ok(unified_bytes) = serde_json::to_vec(&unified_json) {
                     body_bytes = unified_bytes;
@@ -1492,7 +1488,11 @@ async fn handle_buffered_response(
             .any(|w| w == b"tool_calls");
 
         if has_tool_calls_bytes && !state.mcp_registry.is_empty() {
-            let calls = crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes);
+            let config = crate::infrastructure::llm_router::get_provider_config(&executed_provider);
+            let adapter = crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
+
+            let calls =
+                crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes, &*adapter);
 
             if !calls.is_empty() {
                 let results = crate::infrastructure::mcp_client::fan_out(
@@ -1509,6 +1509,7 @@ async fn handle_buffered_response(
                     let tool_messages = crate::infrastructure::mcp_client::merge_results(
                         results,
                         enable_compression,
+                        &*adapter,
                     );
 
                     // Forward merged tool results to telemetry as structured context.
@@ -2474,7 +2475,6 @@ mod tests {
             err_str
         );
     }
-
 
     // ── extract_semantic_text_raw unit tests ──────────────────────────────────
 

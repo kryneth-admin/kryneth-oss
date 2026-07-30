@@ -28,6 +28,8 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 
 use crate::domain::models::AppState;
+use crate::domain::utp_models::{ToolExecutionStatus, UniversalToolResult};
+use crate::infrastructure::providers::traits::UniversalProviderAdapter;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -59,41 +61,25 @@ pub struct ToolResult {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Parses `tool_calls` from an LLM response body and returns them as a
-/// `Vec<ToolCall>`.
+/// Parses `tool_calls` from an LLM response body using the provided UTP `adapter`
+/// and returns them as a `Vec<ToolCall>`.
 ///
 /// Returns an empty `Vec` when no `tool_calls` are present or parsing fails.
-pub fn extract_tool_calls(response_body: &[u8]) -> Vec<ToolCall> {
-    let val: Value = match serde_json::from_slice(response_body) {
-        Ok(v) => v,
+pub fn extract_tool_calls(
+    response_body: &[u8],
+    adapter: &dyn UniversalProviderAdapter,
+) -> Vec<ToolCall> {
+    let universal_calls = match adapter.extract_calls(response_body) {
+        Ok(calls) => calls,
         Err(_) => return Vec::new(),
     };
 
-    let arr = match val.pointer("/choices/0/message/tool_calls") {
-        Some(Value::Array(a)) => a,
-        _ => return Vec::new(),
-    };
-
-    arr.iter()
-        .filter_map(|tc| {
-            let id = tc.get("id")?.as_str()?.to_string();
-            let name = tc.pointer("/function/name")?.as_str()?.to_string();
-            let arguments = tc
-                .pointer("/function/arguments")
-                .and_then(|a| {
-                    if a.is_string() {
-                        a.as_str().map(|s| s.to_string())
-                    } else {
-                        Some(a.to_string())
-                    }
-                })
-                .unwrap_or_else(|| "{}".to_string());
-
-            Some(ToolCall {
-                id,
-                name,
-                arguments,
-            })
+    universal_calls
+        .into_iter()
+        .map(|c| ToolCall {
+            id: c.call_id,
+            name: c.tool_name,
+            arguments: c.arguments,
         })
         .collect()
 }
@@ -187,35 +173,29 @@ pub async fn fan_out(
     results
 }
 
-/// Serialises a `Vec<ToolResult>` into the strict Phase 4 merge format:
-///
-/// ```json
-/// [
-///   {"tool": "jira_search",  "result": {"tickets": [...]}},
-///   {"tool": "github_search", "result": {"error": "MCP_TIMEOUT"}}
-/// ]
-/// ```
-///
-/// This uniform array is appended to the LLM's next-turn `messages` as a
-/// single `role: "tool"` message, giving the model full context of every
-/// call outcome — successes and timeouts alike.
-pub fn merge_results(results: Vec<ToolResult>, _enable_compression: bool) -> Vec<Value> {
-    results
+/// Serialises a `Vec<ToolResult>` into provider-native format using the UTP `adapter`.
+pub fn merge_results(
+    results: Vec<ToolResult>,
+    _enable_compression: bool,
+    adapter: &dyn UniversalProviderAdapter,
+) -> Value {
+    let universal_results: Vec<UniversalToolResult> = results
         .into_iter()
-        .map(|r| {
-            // Parse content as JSON if possible (MCP servers return structured data).
-            // Fallback to wrapping the raw string in a {"text": "..."} object.
-            let result_val: Value =
-                serde_json::from_str(&r.content).unwrap_or_else(|_| json!({"text": r.content}));
-
-            json!({
-                "tool": r.name,
-                "result": result_val,
-                "latency_ms": r.latency_ms,
-                "success": r.success,
-            })
+        .map(|r| UniversalToolResult {
+            call_id: r.tool_call_id,
+            status: if r.success {
+                ToolExecutionStatus::Success
+            } else {
+                ToolExecutionStatus::Error
+            },
+            content: r.content,
+            latency_ms: r.latency_ms,
         })
-        .collect()
+        .collect();
+
+    adapter
+        .format_results(&universal_results)
+        .unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -462,6 +442,7 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_parses_correctly() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let body = serde_json::json!({
             "choices": [{
                 "message": {
@@ -489,7 +470,7 @@ mod tests {
         });
 
         let bytes = serde_json::to_vec(&body).unwrap();
-        let calls = extract_tool_calls(&bytes);
+        let calls = extract_tool_calls(&bytes, &adapter);
 
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].id, "call_abc");
@@ -499,21 +480,24 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_empty_on_no_tool_calls() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let body = serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "Hello"}}]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(extract_tool_calls(&bytes).is_empty());
+        assert!(extract_tool_calls(&bytes, &adapter).is_empty());
     }
 
     #[test]
     fn test_extract_tool_calls_no_panic_on_malformed() {
-        assert!(extract_tool_calls(b"{invalid}").is_empty());
-        assert!(extract_tool_calls(b"").is_empty());
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
+        assert!(extract_tool_calls(b"{invalid}", &adapter).is_empty());
+        assert!(extract_tool_calls(b"", &adapter).is_empty());
     }
 
     #[test]
     fn test_merge_results_strict_array_format() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let results = vec![
             ToolResult {
                 tool_call_id: "call_abc".to_string(),
@@ -531,31 +515,24 @@ mod tests {
             },
         ];
 
-        let merged = merge_results(results, false);
-        assert_eq!(merged.len(), 2);
+        let merged = merge_results(results, false, &adapter);
+        assert!(merged.is_array());
+        let arr = merged.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
 
-        // First entry: successful structured result.
-        assert_eq!(merged[0]["tool"], "jira_search");
-        assert_eq!(merged[0]["success"], true);
-        assert!(
-            merged[0]["result"]["tickets"].is_array(),
-            "result should be parsed JSON"
-        );
+        // First entry: OpenAI format tool message
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[0]["tool_call_id"], "call_abc");
 
-        // Second entry: timeout placeholder.
-        assert_eq!(merged[1]["tool"], "github_search");
-        assert_eq!(merged[1]["success"], false);
-        assert_eq!(
-            merged[1]["result"]["error"].as_str(),
-            Some("MCP_TIMEOUT"),
-            "timeout result must carry MCP_TIMEOUT error key"
-        );
-        assert_eq!(merged[1]["latency_ms"], 5000);
+        // Second entry: timeout result
+        assert_eq!(arr[1]["role"], "tool");
+        assert_eq!(arr[1]["tool_call_id"], "call_def");
+        assert!(arr[1]["content"].as_str().unwrap().contains("MCP_TIMEOUT"));
     }
 
     #[test]
     fn test_merge_results_plain_text_fallback() {
-        // Non-JSON content must be wrapped in {"text": "..."}.
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let results = vec![ToolResult {
             tool_call_id: "c1".to_string(),
             name: "plain_tool".to_string(),
@@ -563,12 +540,12 @@ mod tests {
             latency_ms: 50,
             success: true,
         }];
-        let merged = merge_results(results, false);
-        assert_eq!(
-            merged[0]["result"]["text"].as_str(),
-            Some("plain text result"),
-            "Plain text content must be wrapped in text key"
-        );
+        let merged = merge_results(results, false, &adapter);
+        assert!(merged.is_array());
+        let arr = merged.as_array().unwrap();
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[0]["tool_call_id"], "c1");
+        assert_eq!(arr[0]["content"], "plain text result");
     }
 
     #[test]
