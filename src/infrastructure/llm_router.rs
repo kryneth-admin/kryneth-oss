@@ -19,6 +19,7 @@ pub enum SchemaFormat {
     OpenAI,
     Anthropic,
     Gemini,
+    Cohere,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +39,7 @@ pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
     let (schema, auth) = match provider.as_str() {
         "anthropic" => (SchemaFormat::Anthropic, AuthScheme::XApiKey),
         "gemini" | "google" => (SchemaFormat::Gemini, AuthScheme::GoogleApiKey),
+        "cohere" => (SchemaFormat::Cohere, AuthScheme::Bearer),
         _ => (SchemaFormat::OpenAI, AuthScheme::Bearer),
     };
 
@@ -47,6 +49,12 @@ pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
         auth_scheme: auth,
         schema_format: schema,
     }
+}
+
+pub fn request_has_tools(body_bytes: &[u8]) -> bool {
+    let scan_limit = body_bytes.len().min(16384);
+    let slice = &body_bytes[..scan_limit];
+    slice.windows(7).any(|w| w == b"\"tools\"") || slice.windows(12).any(|w| w == b"\"tool_calls\"")
 }
 
 fn is_retryable_error(status: u16) -> bool {
@@ -72,7 +80,7 @@ pub struct PreparedUpstreamRequest {
     pub accept_header: String,
 }
 
-pub fn extract_model_fast(body_bytes: &mut [u8]) -> Result<String, GatewayError> {
+pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
     // Scan first 8KB or so
     let scan_limit = body_bytes.len().min(8192);
     let slice = &body_bytes[..scan_limit];
@@ -113,7 +121,7 @@ pub fn extract_model_fast(body_bytes: &mut [u8]) -> Result<String, GatewayError>
         model: Option<std::borrow::Cow<'a, str>>,
     }
     let extracted: ExtractModel<'_> =
-        simd_json::from_slice(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+        serde_json::from_slice(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
     let model_owned = extracted
         .model
         .as_deref()
@@ -272,17 +280,33 @@ pub async fn execute_upstream_request(
         }
     }
 
+    let has_tools = request_has_tools(body_bytes);
+
     // Fallback loop: circuit-breaker is tripped on each retryable failure.
     while let Some(target) = prep.fallback_targets.first().cloned() {
+        let provider_id = target.schema_format.as_str();
+        let config = get_provider_config(provider_id);
+
+        if has_tools
+            && (config.schema_format == SchemaFormat::Cohere
+                || target.schema_format.eq_ignore_ascii_case("cohere")
+                || target.provider_name.eq_ignore_ascii_case("cohere"))
+        {
+            warn!(
+                model = %prep.model,
+                key_alias = %target.api_key_alias,
+                "Skipping Cohere fallback target for tool-enabled request to prevent HTTP 422 error"
+            );
+            prep.fallback_targets.remove(0);
+            continue;
+        }
+
         info!(
             model = %prep.model,
             key_alias = %target.api_key_alias,
             priority = target.priority,
             "Attempting fallback upstream request"
         );
-
-        let provider_id = target.schema_format.as_str();
-        let config = get_provider_config(provider_id);
 
         let fallback_req = build_provider_request(
             &state.http_client,
@@ -365,9 +389,10 @@ pub fn build_provider_request(
         struct ExtractStream {
             stream: Option<bool>,
         }
-        let extracted_stream = simd_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
-            GatewayError::ResponseBuild(format!("Invalid JSON body for stream check: {}", e))
-        })?;
+        let extracted_stream =
+            serde_json::from_slice::<ExtractStream>(body_bytes).map_err(|e| {
+                GatewayError::ResponseBuild(format!("Invalid JSON body for stream check: {}", e))
+            })?;
         let is_stream = extracted_stream.stream.unwrap_or(false);
         if is_stream {
             format!(
@@ -1120,6 +1145,124 @@ mod tests {
 
         assert_eq!(resp.status().as_u16(), 200);
         assert_eq!(success_key, "GROQ_API_KEY");
+        assert_eq!(hot_swapped, 1);
+        assert_eq!(updated_prep.executed_provider, "openai");
+    }
+
+    #[test]
+    fn test_request_has_tools_detection() {
+        let payload_with_tools =
+            r#"{"model": "gpt-4o", "messages": [], "tools": [{"type": "function"}]}"#;
+        assert!(request_has_tools(payload_with_tools.as_bytes()));
+
+        let payload_with_tool_calls =
+            r#"{"model": "gpt-4o", "messages": [{"role": "assistant", "tool_calls": []}]}"#;
+        assert!(request_has_tools(payload_with_tool_calls.as_bytes()));
+
+        let payload_plain =
+            r#"{"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]}"#;
+        assert!(!request_has_tools(payload_plain.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn test_execute_upstream_request_skips_cohere_fallback_on_tools() {
+        let (state, primary_server) = setup_test_state().await;
+        let cohere_server = MockServer::start().await;
+        let final_server = MockServer::start().await;
+
+        // Primary returns 500 Server Error (retryable)
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&primary_server)
+            .await;
+
+        // Cohere returns 422 Unprocessable Entity if called (should be skipped!)
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("Cohere 422 invalid schema"))
+            .mount(&cohere_server)
+            .await;
+
+        // Final OpenAI target returns 200 OK
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-ok",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Success"}}]
+            })))
+            .mount(&final_server)
+            .await;
+
+        let tenant_id = "test-tenant-cohere-skip";
+        let mut tenant_map = HashMap::new();
+        tenant_map.insert(
+            "agentic-model".to_string(),
+            ModelConfig {
+                targets: vec![
+                    UpstreamTarget {
+                        priority: 1,
+                        weight: 100,
+                        api_key_alias: "primary_key".into(),
+                        api_key: "primary_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: primary_server.uri(),
+                        target_model: "gpt-4o".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 2,
+                        weight: 100,
+                        api_key_alias: "COHERE_API_KEY".into(),
+                        api_key: "cohere_secret".to_string(),
+                        provider_name: "cohere".into(),
+                        base_url: cohere_server.uri(),
+                        target_model: "command-r-plus".to_string(),
+                        schema_format: "cohere".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 3,
+                        weight: 100,
+                        api_key_alias: "BACKUP_OPENAI_KEY".into(),
+                        api_key: "backup_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: final_server.uri(),
+                        target_model: "gpt-4o-mini".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "agentic-model",
+                "messages": [{"role": "user", "content": "use a tool"}],
+                "tools": [{"type": "function", "function": {"name": "test"}}]
+            })
+            .to_string(),
+        );
+
+        let mut body_mut = body.to_vec();
+        let prep = prep_upstream_request(
+            &state,
+            tenant_id,
+            &mut body_mut,
+            "application/json",
+            RoutingStrategy::Default,
+        )
+        .await
+        .unwrap();
+
+        let (resp, success_key, hot_swapped, updated_prep) =
+            execute_upstream_request(&state, prep, &mut body_mut)
+                .await
+                .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(success_key, "BACKUP_OPENAI_KEY");
         assert_eq!(hot_swapped, 1);
         assert_eq!(updated_prep.executed_provider, "openai");
     }

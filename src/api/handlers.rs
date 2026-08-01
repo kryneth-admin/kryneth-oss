@@ -362,17 +362,10 @@ pub fn detect_agentic_payload(body_bytes: &[u8], content_type: &str) -> bool {
         return false;
     }
 
-    // Lazy Vec allocation — only reached for small JSON payloads.
-    // Save result to a local bool *before* the block ends so the BorrowedValue
-    // (which borrows bytes_vec) is dropped first, then bytes_vec (fixes E0597).
-    let mut bytes_vec = body_bytes.to_vec();
-    let result = match simd_json::to_borrowed_value(&mut bytes_vec) {
-        Ok(simd_json::BorrowedValue::Object(ref obj)) => {
-            obj.contains_key("tools") || obj.contains_key("tool_choice")
-        }
+    match serde_json::from_slice::<Value>(body_bytes) {
+        Ok(Value::Object(ref obj)) => obj.contains_key("tools") || obj.contains_key("tool_choice"),
         _ => false,
-    };
-    result
+    }
 }
 
 // ── Dashboard Handlers ────────────────────────────────────────────────────────

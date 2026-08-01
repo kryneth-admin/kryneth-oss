@@ -138,7 +138,7 @@ impl UniversalProviderAdapter for OpenAIPlugin {
     }
 
     fn to_universal(&self, payload: &mut [u8]) -> Result<KrynethConversation, GatewayError> {
-        let req: OpenAIChatRequest = simd_json::from_slice(payload)
+        let req: OpenAIChatRequest = serde_json::from_slice(payload)
             .map_err(|e| GatewayError::InvalidJSON(format!("OpenAI parse error: {e}")))?;
 
         let mut system_prompt = None;

@@ -23,5 +23,6 @@ pub fn get_utp_adapter(schema: &SchemaFormat) -> Box<dyn UniversalProviderAdapte
         SchemaFormat::OpenAI => Box::new(openai::OpenAIPlugin::new()),
         SchemaFormat::Anthropic => Box::new(anthropic::AnthropicPlugin::new()),
         SchemaFormat::Gemini => Box::new(gemini::GeminiPlugin::new()),
+        SchemaFormat::Cohere => Box::new(cohere::CoherePlugin::new()),
     }
 }

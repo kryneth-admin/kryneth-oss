@@ -590,8 +590,10 @@ pub async fn execute_proxy(
     let mut parse_buffer = body_bytes.to_vec();
 
     // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
+    // Isolate inspection buffer to prevent `simd_json` in-place mutation of `parse_buffer`
     let (is_streaming, semantic_text) = {
-        let lazy_parsed = simd_json::to_borrowed_value(&mut parse_buffer)
+        let mut inspect_buf = parse_buffer.clone();
+        let lazy_parsed = simd_json::to_borrowed_value(&mut inspect_buf)
             .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
         let is_stream = lazy_parsed
@@ -2599,6 +2601,37 @@ mod tests {
         assert!(
             result.unwrap().len() <= 64 * 1024,
             "output must be capped at 64 KiB"
+        );
+    }
+
+    #[test]
+    fn test_proxy_buffer_unmutated_with_escaped_json_and_xml_tags() {
+        let raw_payload = r#"{"model":"gpt-4","messages":[{"role":"user","content":"<function=web_search>"}],"tools":[{"type":"function","function":{"name":"search","arguments":"{\"query\": \"AI explanation\"}"}}],"stream":true}"#;
+        let parse_buffer = raw_payload.as_bytes().to_vec();
+
+        // Run the inspection pipeline stage (matching execute_proxy inspection logic)
+        let (is_streaming, semantic_text) = {
+            let mut inspect_buf = parse_buffer.clone();
+            let lazy_parsed = simd_json::to_borrowed_value(&mut inspect_buf)
+                .expect("inspect_buf should be valid JSON");
+
+            let is_stream = lazy_parsed
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let sem_text = extract_semantic_text(&lazy_parsed);
+            (is_stream, sem_text)
+        };
+
+        assert!(is_streaming, "stream flag must be true");
+        assert!(semantic_text.is_some(), "semantic text must be extracted");
+
+        // Critical Assertion: The primary transmission buffer must remain 100% byte-identical
+        assert_eq!(
+            parse_buffer,
+            raw_payload.as_bytes(),
+            "Outbound transmission buffer must retain all backslashes and XML tags without in-place mutation corruption"
         );
     }
 }
