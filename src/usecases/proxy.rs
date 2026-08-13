@@ -91,21 +91,113 @@ fn get_requested_provider(state: &Arc<AppState>, tenant_id: &str, model_name: &s
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Extracts textual content from user messages across different LLM provider schemas (OpenAI, Anthropic, Gemini),
-/// returning `None` if no clean user semantic text can be isolated to prevent vector cache pollution.
+/// Extracts textual content from the most recent user message for semantic embedding,
+/// returning `None` if the payload represents an active agentic tool-execution turn.
+///
+/// ## Agentic Loop Prevention
+///
+/// In multi-turn agentic workflows (User → Assistant `tool_calls` → Tool result → Assistant
+/// next turn), every subsequent LLM call re-includes the original user prompt. Without this
+/// guard, `extract_semantic_text` would always land on the same user text, generate an
+/// identical 384-dim BGE vector, and the L1/L2 pgvector lookup would return `dist=0.0000,
+/// sim=1.0000` — trapping the agent in an infinite cache hit loop.
+///
+/// Returning `None` propagates through the pipeline:
+/// `semantic_text = None` → `embedding_vector = None` → cache future short-circuits →
+/// request is forwarded directly to the upstream LLM without cache read or write.
+///
+/// ## What is NOT bypassed
+///
+/// - **L1 Exact Cache**: keyed on the full raw JSON body. Each agentic turn appends new
+///   messages, so the raw bytes differ every turn — false exact-match collisions are
+///   impossible. No bypass needed.
+/// - **PII scanning** (`extract_semantic_text_raw`): intentionally left active. Agent tools
+///   (e.g., `query_database`, `fetch_user_profile`) are the primary vectors for introducing
+///   raw sensitive data (PII) into the LLM context. The 64 KiB bounded scan is a mandatory
+///   security trade-off for data-privacy compliance.
 fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<String> {
-    let mut semantic_text = String::new();
-
-    // 1. OpenAI & Anthropic Messages format
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 1: OpenAI / Anthropic `messages` array — MERGED SINGLE-PASS
+    //
+    // Iterates newest-to-oldest (rev). On each message:
+    //   • If a tool/function execution marker is detected → return None immediately.
+    //   • If a user message is found first → extract its text and break.
+    //
+    // Single-pass O(N): detection and extraction share one reverse walk.
+    // ─────────────────────────────────────────────────────────────────────────
     if let Some(simd_json::BorrowedValue::Array(messages)) = payload.get("messages") {
+        let mut semantic_text = String::new();
+
         for i in (0..messages.len()).rev() {
             let msg = &messages[i];
-            if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+            // ── Agentic bypass: tool / function response role ─────────────
+            if role == "tool" || role == "function" {
+                tracing::debug!(
+                    "Agentic tool response turn detected (role={}); bypassing semantic cache",
+                    role
+                );
+                return None;
+            }
+
+            // ── Agentic bypass: assistant with active tool invocations ────
+            if role == "assistant" {
+                if msg
+                    .get("tool_calls")
+                    .and_then(|tc| tc.as_array())
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    tracing::debug!(
+                        "Agentic assistant tool_calls detected; bypassing semantic cache"
+                    );
+                    return None;
+                }
+                if msg.get("function_call").is_some() {
+                    tracing::debug!(
+                        "Agentic assistant function_call detected; bypassing semantic cache"
+                    );
+                    return None;
+                }
+                // Anthropic assistants use a content block array with type="tool_use"
+                // instead of (or in addition to) the tool_calls field.
+                if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                    for block in content_blocks {
+                        if let Some(bt) = block.get("type").and_then(|t| t.as_str()) {
+                            if bt == "tool_use" {
+                                tracing::debug!(
+                                    "Anthropic assistant tool_use content block detected; bypassing semantic cache"
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                }
+                // assistant messages with no tool invocations are skipped — continue scan
+                continue;
+            }
+
+            // ── Agentic bypass: Anthropic tool content blocks (non-assistant roles) ──
+            // Catches `tool_result` in user-role messages (the tool response turn).
+            if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in content_blocks {
+                    if let Some(bt) = block.get("type").and_then(|t| t.as_str()) {
+                        if bt == "tool_result" {
+                            tracing::debug!(
+                                "Anthropic tool_result content block detected; bypassing semantic cache"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+
+            // ── Extraction: most recent user message ──────────────────────
+            if role == "user" {
                 if let Some(content) = msg.get("content") {
                     if let Some(text) = content.as_str() {
                         semantic_text.push_str(text);
                         semantic_text.push('\n');
-                        break;
                     } else if let Some(arr) = content.as_array() {
                         for block in arr {
                             if let Some(text) = block.as_str() {
@@ -120,14 +212,25 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                                 }
                             }
                         }
-                        break;
                     }
                 }
+                break; // stop after the most recent user message
             }
         }
+
+        let trimmed = semantic_text.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
-    // 2. Anthropic legacy prompt format
-    else if let Some(prompt) = payload.get("prompt").and_then(|p| p.as_str()) {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 2: Anthropic legacy `prompt` string format
+    // No tool-turn markers exist in this format; extract the most recent Human turn.
+    // ─────────────────────────────────────────────────────────────────────────
+    if let Some(prompt) = payload.get("prompt").and_then(|p| p.as_str()) {
         let mut clean_prompt = prompt;
         if let Some(human_idx) = prompt.rfind("\n\nHuman:") {
             let start = human_idx + "\n\nHuman:".len();
@@ -137,10 +240,40 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                 clean_prompt = &prompt[start..];
             }
         }
-        semantic_text.push_str(clean_prompt.trim());
+        let trimmed = clean_prompt.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
-    // 3. Google Gemini format
-    else if let Some(simd_json::BorrowedValue::Array(contents)) = payload.get("contents") {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 3: Google Gemini `contents` array — TWO-PASS
+    //
+    // Pass 1 (forward): detect functionCall / functionResponse in any part.
+    //   These appear in `model`-role content, not user-role content, so a single
+    //   reverse walk cannot reliably detect and extract in one pass.
+    // Pass 2 (reverse): extract the most recent `user`-role text parts.
+    // ─────────────────────────────────────────────────────────────────────────
+    if let Some(simd_json::BorrowedValue::Array(contents)) = payload.get("contents") {
+        // Pass 1: agentic bypass detection (forward iteration on contents)
+        for content in contents {
+            if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
+                for part in parts {
+                    if part.get("functionResponse").is_some() || part.get("functionCall").is_some()
+                    {
+                        tracing::debug!(
+                            "Gemini functionResponse/functionCall detected; bypassing semantic cache"
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: user text extraction (reverse index walk)
+        let mut semantic_text = String::new();
         for i in (0..contents.len()).rev() {
             let content = &contents[i];
             if content.get("role").and_then(|r| r.as_str()) == Some("user") {
@@ -151,18 +284,20 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                             semantic_text.push('\n');
                         }
                     }
-                    break;
                 }
+                break;
             }
         }
+
+        let trimmed = semantic_text.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
 
-    let trimmed = semantic_text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    None
 }
 
 /// Zero-copy PII scan target extractor.
@@ -1017,6 +1152,11 @@ fn handle_cache_hit(
         agent_loops,
     );
 
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
     if is_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
         let mock_id = format!("chatcmpl-cached-{}", uuid::Uuid::new_v4());
@@ -1024,18 +1164,18 @@ fn handle_cache_hit(
         let cached_content = cached_content.clone();
 
         tokio::spawn(async move {
-            // Chunk 1: Content delta
+            // Chunk 1: Role initialization
             let chunk1 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
-                "created": 0,
+                "created": created,
                 "model": model_name,
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": cached_content
+                            "content": ""
                         },
                         "finish_reason": null
                     }
@@ -1046,11 +1186,32 @@ fn handle_cache_hit(
                 return;
             }
 
-            // Chunk 2: Stop finish_reason
+            // Chunk 2: Content delivery
             let chunk2 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
-                "created": 0,
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": cached_content
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            });
+            let data2 = format!("data: {}\n\n", chunk2);
+            if tx.send(Ok(bytes::Bytes::from(data2))).await.is_err() {
+                return;
+            }
+
+            // Chunk 3: Finish reason stop
+            let chunk3 = json!({
+                "id": mock_id,
+                "object": "chat.completion.chunk",
+                "created": created,
                 "model": model_name,
                 "choices": [
                     {
@@ -1060,8 +1221,8 @@ fn handle_cache_hit(
                     }
                 ]
             });
-            let data2 = format!("data: {}\n\n", chunk2);
-            if tx.send(Ok(bytes::Bytes::from(data2))).await.is_err() {
+            let data3 = format!("data: {}\n\n", chunk3);
+            if tx.send(Ok(bytes::Bytes::from(data3))).await.is_err() {
                 return;
             }
 
@@ -1080,10 +1241,11 @@ fn handle_cache_hit(
             cache_hit: true,
         })
     } else {
+        let mock_id = format!("chatcmpl-cached-{}", uuid::Uuid::new_v4());
         let mock_response = json!({
-            "id": "chatcmpl-cached",
+            "id": mock_id,
             "object": "chat.completion",
-            "created": 0,
+            "created": created,
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": cached_content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -2606,6 +2768,14 @@ mod tests {
 
     #[test]
     fn test_proxy_buffer_unmutated_with_escaped_json_and_xml_tags() {
+        // NOTE on `tools` vs `tool_calls`:
+        // - `"tools": [...]` at the TOP LEVEL = tool SCHEMA DEFINITIONS provided to the model.
+        //   This is part of the initial user request setup and does NOT signal an agentic turn.
+        //   extract_semantic_text MUST still extract user text and return Some(...).
+        // - `"tool_calls": [...]` INSIDE an `assistant` message = the model ACTIVELY INVOKING
+        //   a tool. This signals an in-progress agentic turn and extract_semantic_text MUST
+        //   return None to bypass the semantic cache.
+        // This test covers the former (tool definitions) — semantic cache must remain active.
         let raw_payload = r#"{"model":"gpt-4","messages":[{"role":"user","content":"<function=web_search>"}],"tools":[{"type":"function","function":{"name":"search","arguments":"{\"query\": \"AI explanation\"}"}}],"stream":true}"#;
         let parse_buffer = raw_payload.as_bytes().to_vec();
 
@@ -2625,7 +2795,10 @@ mod tests {
         };
 
         assert!(is_streaming, "stream flag must be true");
-        assert!(semantic_text.is_some(), "semantic text must be extracted");
+        assert!(
+            semantic_text.is_some(),
+            "top-level tool definitions must NOT bypass cache — only tool_calls in messages should"
+        );
 
         // Critical Assertion: The primary transmission buffer must remain 100% byte-identical
         assert_eq!(
@@ -2633,5 +2806,355 @@ mod tests {
             raw_payload.as_bytes(),
             "Outbound transmission buffer must retain all backslashes and XML tags without in-place mutation corruption"
         );
+    }
+
+    // ── extract_semantic_text agentic bypass unit tests ───────────────────────
+
+    #[test]
+    fn test_extract_semantic_text_single_turn_user() {
+        // Standard single-turn query: semantic cache must remain active → Some(text)
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the capital of France?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert_eq!(
+            result.as_deref(),
+            Some("What is the capital of France?"),
+            "single-turn user query must extract text for caching"
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_tool_role() {
+        // Payload contains a role:"tool" message → must return None to bypass cache
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Search the web for Rust async"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "call_abc", "type": "function", "function": {"name": "search_web", "arguments": "{}"}}]},
+                {"role": "tool",      "tool_call_id": "call_abc", "content": "Rust async uses tokio..."}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "role:tool message must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_assistant_tool_calls() {
+        // Assistant message with non-empty tool_calls array → must return None
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Fetch my profile"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_xyz", "type": "function", "function": {"name": "fetch_user_profile", "arguments": "{}"}}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "assistant with non-empty tool_calls must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_assistant_function_call() {
+        // Assistant message with legacy function_call object → must return None
+        let body = serde_json::json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "user",      "content": "Get weather"},
+                {"role": "assistant", "content": null, "function_call": {"name": "get_weather", "arguments": "{}"}}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "assistant with function_call must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_anthropic_tool_use_block() {
+        // Anthropic: content block with type="tool_use" in assistant message → must return None
+        let body = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user",      "content": "Run the query"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "query_database", "input": {}}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Anthropic tool_use content block must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_anthropic_tool_result_block() {
+        // Anthropic: content block with type="tool_result" in user message → must return None
+        let body = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user",      "content": "Check my balance"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_02", "name": "get_balance", "input": {}}
+                ]},
+                {"role": "user",      "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_02", "content": "Balance: $500"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Anthropic tool_result content block must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_gemini_function_response() {
+        // Gemini: any part contains functionResponse → must return None
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user",  "parts": [{"text": "What is the weather?"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {}}}]},
+                {"role": "user",  "parts": [{"functionResponse": {"name": "get_weather", "response": {"temperature": "22C"}}}]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Gemini functionResponse must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_gemini_function_call() {
+        // Gemini: any part contains functionCall → must return None
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user",  "parts": [{"text": "Search for Rust crates"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "search_crates", "args": {"query": "async"}}}]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Gemini functionCall must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_multi_turn_no_tools() {
+        // Multi-turn conversation with NO tool usage: must still cache using most recent user text.
+        // This validates that the bypass fix does not break normal RAG / conversational use cases.
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Tell me about Paris."},
+                {"role": "assistant", "content": "Paris is the capital of France."},
+                {"role": "user",      "content": "What is its population?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert_eq!(
+            result.as_deref(),
+            Some("What is its population?"),
+            "multi-turn without tools must extract the most recent user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_cache_hit_streaming_three_chunk_sequence() {
+        let (state, _mock_server) = setup_proxy_test_state().await;
+        let trace_ctx = TraceContext {
+            trace_id: "t_cache_1".to_string(),
+            session_id: "s_cache_1".to_string(),
+            parent_trace_id: None,
+        };
+
+        let result = handle_cache_hit(
+            &state,
+            "Cached response content".to_string(),
+            "test-tenant-123",
+            "test-model",
+            "What is 2+2?",
+            "What is 2+2?",
+            &trace_ctx,
+            std::time::Instant::now(),
+            true,  // is_streaming
+            false, // is_free_tier
+            true,  // semantic_cache_enabled
+            None,
+            None,
+            0,
+        )
+        .expect("handle_cache_hit should succeed");
+
+        assert_eq!(result.content_type, "text/event-stream");
+        assert!(result.cache_hit);
+
+        let ProxyBody::Stream(body_stream) = result.body else {
+            panic!("Expected ProxyBody::Stream");
+        };
+
+        use futures::StreamExt;
+        let mut chunks_raw = Vec::new();
+        let mut stream = body_stream.into_data_stream();
+        while let Some(chunk_res) = stream.next().await {
+            let chunk_bytes = chunk_res.expect("stream chunk should be ok");
+            chunks_raw.extend_from_slice(&chunk_bytes);
+        }
+
+        let stream_text = String::from_utf8(chunks_raw).expect("valid utf8 stream text");
+        let lines: Vec<&str> = stream_text
+            .lines()
+            .filter(|l| l.starts_with("data: "))
+            .collect();
+
+        assert_eq!(
+            lines.len(),
+            4,
+            "Expected 4 SSE data lines (Role init, Content delivery, Stop finish_reason, [DONE])"
+        );
+
+        // Line 1: Role initialization
+        let payload1: serde_json::Value =
+            serde_json::from_str(lines[0].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload1["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(payload1["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(payload1["choices"][0]["delta"]["content"], "");
+        assert!(payload1["choices"][0]["finish_reason"].is_null());
+
+        // Line 2: Content delivery
+        let payload2: serde_json::Value =
+            serde_json::from_str(lines[1].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload2["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(
+            payload2["choices"][0]["delta"]["content"],
+            "Cached response content"
+        );
+        assert!(
+            payload2["choices"][0]["delta"].get("role").is_none(),
+            "Chunk 2 must not re-include role"
+        );
+        assert!(payload2["choices"][0]["finish_reason"].is_null());
+
+        // Line 3: Finish reason stop
+        let payload3: serde_json::Value =
+            serde_json::from_str(lines[2].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload3["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(payload3["choices"][0]["finish_reason"], "stop");
+
+        // Line 4: Terminal marker
+        assert_eq!(lines[3], "data: [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_handle_cache_hit_non_streaming_timestamp() {
+        let (state, _mock_server) = setup_proxy_test_state().await;
+        let trace_ctx = TraceContext {
+            trace_id: "t_cache_2".to_string(),
+            session_id: "s_cache_2".to_string(),
+            parent_trace_id: None,
+        };
+
+        let result = handle_cache_hit(
+            &state,
+            "Cached non-streaming content".to_string(),
+            "test-tenant-123",
+            "test-model",
+            "Hello",
+            "Hello",
+            &trace_ctx,
+            std::time::Instant::now(),
+            false, // is_streaming = false
+            false,
+            true,
+            None,
+            None,
+            0,
+        )
+        .expect("handle_cache_hit should succeed");
+
+        assert_eq!(result.content_type, "application/json");
+        assert!(result.cache_hit);
+
+        let ProxyBody::Buffered(bytes) = result.body else {
+            panic!("Expected ProxyBody::Buffered");
+        };
+
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            payload["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert!(
+            payload["id"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("chatcmpl-cached-"),
+            "id must be dynamic chatcmpl-cached-..."
+        );
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "Cached non-streaming content"
+        );
+        assert_eq!(payload["choices"][0]["finish_reason"], "stop");
     }
 }

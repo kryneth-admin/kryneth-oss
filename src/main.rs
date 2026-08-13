@@ -18,7 +18,7 @@ use domain::models::{AppState, RoutingState};
 // ── Config defaults ───────────────────────────────────────────────────────────
 
 const DEFAULT_PORT: &str = "8080";
-const DEFAULT_COMPLIANCE_URL: &str = "http://localhost:8083";
+const DEFAULT_COMPLIANCE_URL: &str = "http://127.0.0.1:8083";
 const DEFAULT_RATE_LIMIT_MAX: &str = "60";
 const DEFAULT_RATE_LIMIT_WINDOW: &str = "60";
 const HTTP_TIMEOUT_SECS: u64 = 120;

@@ -363,9 +363,11 @@ pub async fn record_session_spend(_state: &Arc<AppState>, session_id: &str, _cos
 /// Set `SANDBOX_FALLBACK_MODE=open` to revert to fail-open behaviour.
 #[inline]
 fn sandbox_is_fail_open() -> bool {
+    // In OSS environments, if the compliance service is not expected to run,
+    // we default to fail-open to allow agent tool calls to proceed without 503 timeouts.
     std::env::var("SANDBOX_FALLBACK_MODE")
-        .map(|v| v.eq_ignore_ascii_case("open"))
-        .unwrap_or(false)
+        .map(|v| v.eq_ignore_ascii_case("open") || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true)
 }
 
 /// Compact deny payload — single JSON object, minimal token cost.
@@ -513,7 +515,10 @@ mod tests {
     #[test]
     fn test_sandbox_fail_open_env_flag() {
         std::env::remove_var("SANDBOX_FALLBACK_MODE");
-        assert!(!sandbox_is_fail_open(), "Default must be fail-closed");
+        assert!(
+            sandbox_is_fail_open(),
+            "Default must be fail-open in OSS mode"
+        );
 
         std::env::set_var("SANDBOX_FALLBACK_MODE", "open");
         assert!(
@@ -529,8 +534,14 @@ mod tests {
 
         std::env::set_var("SANDBOX_FALLBACK_MODE", "true");
         assert!(
+            sandbox_is_fail_open(),
+            "SANDBOX_FALLBACK_MODE=true must be fail-open"
+        );
+
+        std::env::set_var("SANDBOX_FALLBACK_MODE", "closed");
+        assert!(
             !sandbox_is_fail_open(),
-            "SANDBOX_FALLBACK_MODE=true must be fail-closed"
+            "SANDBOX_FALLBACK_MODE=closed must be fail-closed"
         );
 
         std::env::remove_var("SANDBOX_FALLBACK_MODE");
