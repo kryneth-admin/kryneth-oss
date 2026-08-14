@@ -5,6 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://www.docker.com/)
 [![Discord](https://img.shields.io/discord/1234567890?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/uurgj9fMy8)
+[![Rust CI](https://github.com/kryneth-admin/kryneth-oss/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/kryneth-admin/kryneth-oss/actions/workflows/rust-ci.yml)
 
 > **Agents don't fail loudly. They fail silently, burn money, and nobody notices until production breaks.**
 >
