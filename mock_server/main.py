@@ -156,6 +156,51 @@ async def generate_sse_deepseek_thinking():
         await asyncio.sleep(0.05)
     yield "data: [DONE]\n\n"
 
+async def generate_sse_stock_price_tool_call():
+    """Generates an SSE stream containing a web_search tool call invocation."""
+    chunks = [
+        {
+            "id": "chatcmpl-mock-tc-stock",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_stock_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "web_search",
+                                    "arguments": '{"query": "AMZN stock price"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-mock-tc-stock",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        },
+    ]
+
+    for chunk in chunks:
+        yield f"data: {json.dumps(chunk)}\n\n"
+        await asyncio.sleep(0.05)
+
+    yield "data: [DONE]\n\n"
+
 async def generate_sse_stock_price_final():
     """Generates final SSE stream text for stock price tool result."""
     chunks = [
@@ -263,9 +308,9 @@ async def chat_completions(
                     )
 
                 if role == "user" and ("stock price" in content_str.lower() or "amzn" in content_str.lower()):
-                    logger.info("Stateful trigger: User asked for AMZN stock price -> Returning tool_calls SSE")
+                    logger.info("Stateful trigger: User asked for AMZN stock price -> Returning web_search tool_calls SSE")
                     return StreamingResponse(
-                        generate_sse_tool_call(),
+                        generate_sse_stock_price_tool_call(),
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
                     )
