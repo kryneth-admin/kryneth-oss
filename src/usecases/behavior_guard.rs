@@ -578,7 +578,7 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: None,
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -592,10 +592,12 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: moka::future::Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
             pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
             budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),

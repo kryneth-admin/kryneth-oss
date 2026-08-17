@@ -74,5 +74,10 @@ coverage/
 .cache/
 *.cache
 
+# Python & Virtualenv
+.venv/
+**/__pycache__/
+*.pyc
+
 # System
 .nvmrc

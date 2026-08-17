@@ -1,0 +1,15 @@
+{
+  "name": "kryneth-e2e-clients",
+  "version": "1.0.0",
+  "description": "Automated End-to-End Client Simulator for Kryneth AI Gateway",
+  "type": "module",
+  "main": "runner.js",
+  "scripts": {
+    "test": "node runner.js"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.42",
+    "ai": "^7.0.66",
+    "openai": "^4.67.0"
+  }
+}

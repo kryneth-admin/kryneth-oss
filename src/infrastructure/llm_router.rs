@@ -137,6 +137,7 @@ pub async fn prep_upstream_request(
     body_bytes: &mut [u8],
     accept_header: &str,
     _strategy: RoutingStrategy,
+    test_scenario: Option<&str>,
 ) -> Result<PreparedUpstreamRequest, GatewayError> {
     // 1. Extract the model from the incoming request using the fast-path scanner
     let model_owned = extract_model_fast(body_bytes)?;
@@ -211,6 +212,7 @@ pub async fn prep_upstream_request(
         &primary_target.target_model,
         body_bytes,
         accept_header,
+        test_scenario,
     )?;
 
     Ok(PreparedUpstreamRequest {
@@ -227,6 +229,9 @@ pub async fn prep_upstream_request(
     })
 }
 
+/// Dynamic Routing Helper with Circuit-Breaker Fallbacks.
+/// Executes the pre-built primary request, and if it fails with a retryable HTTP status code,
+/// iterates through fallback targets in priority order, building and attempting each one.
 pub async fn execute_upstream_request(
     state: &Arc<AppState>,
     mut prep: PreparedUpstreamRequest,
@@ -259,11 +264,15 @@ pub async fn execute_upstream_request(
                 model = %prep.model,
                 key_alias = %prep.primary_target.api_key_alias,
                 status = status,
-                "Primary provider key failed with retryable error, tripping circuit breaker and falling back"
+                "Primary target returned retryable status code — triggering circuit breaker"
             );
-            // Trip the breaker for the primary key too!
+            // Open circuit breaker for 30s
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state.circuit_breaker.insert(cb_key, ()).await;
+            state
+                .circuit_breaker
+                .insert(cb_key, ())
+                .await;
+
             last_error = GatewayError::ResponseBuild(format!("Provider returned {}", status));
         }
         Err(e) => {
@@ -271,92 +280,127 @@ pub async fn execute_upstream_request(
                 model = %prep.model,
                 key_alias = %prep.primary_target.api_key_alias,
                 error = %e,
-                "Primary provider key unreachable, tripping circuit breaker and falling back"
+                "Primary target network request failed — triggering circuit breaker"
             );
-            // Trip the breaker for the primary key too!
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state.circuit_breaker.insert(cb_key, ()).await;
+            state
+                .circuit_breaker
+                .insert(cb_key, ())
+                .await;
+
             last_error = GatewayError::UpstreamUnreachable(e);
         }
     }
 
-    let has_tools = request_has_tools(body_bytes);
-
-    // Fallback loop: circuit-breaker is tripped on each retryable failure.
-    while let Some(target) = prep.fallback_targets.first().cloned() {
-        let provider_id = target.schema_format.as_str();
-        let config = get_provider_config(provider_id);
-
-        if has_tools
-            && (config.schema_format == SchemaFormat::Cohere
-                || target.schema_format.eq_ignore_ascii_case("cohere")
-                || target.provider_name.eq_ignore_ascii_case("cohere"))
-        {
+    // Try fallbacks in priority order
+    for (i, fallback) in prep.fallback_targets.clone().into_iter().enumerate() {
+        let cb_key = circuit_breaker_key(&prep.tenant_id, &fallback.api_key_alias);
+        if state.circuit_breaker.get(&cb_key).await.is_some() {
             warn!(
                 model = %prep.model,
-                key_alias = %target.api_key_alias,
-                "Skipping Cohere fallback target for tool-enabled request to prevent HTTP 422 error"
+                key_alias = %fallback.api_key_alias,
+                "Fallback target circuit breaker OPEN — skipping"
             );
-            prep.fallback_targets.remove(0);
             continue;
         }
 
         info!(
             model = %prep.model,
-            key_alias = %target.api_key_alias,
-            priority = target.priority,
-            "Attempting fallback upstream request"
+            key_alias = %fallback.api_key_alias,
+            fallback_index = i + 1,
+            "Attempting fallback target request"
         );
+
+        let fallback_config = get_provider_config(fallback.schema_format.as_str());
 
         let fallback_req = build_provider_request(
             &state.http_client,
-            &config,
-            &target.base_url,
-            &target.api_key,
+            &fallback_config,
+            &fallback.base_url,
+            &fallback.api_key,
             &prep.model,
-            &target.target_model,
+            &fallback.target_model,
             body_bytes,
-            &prep.accept_header,
-        )?;
+            "application/json",
+            None,
+        );
 
-        match fallback_req.send().await {
+        let req_builder = match fallback_req {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    model = %prep.model,
+                    key_alias = %fallback.api_key_alias,
+                    error = %e,
+                    "Failed to build fallback request — skipping"
+                );
+                continue;
+            }
+        };
+
+        match req_builder.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 if !is_retryable_error(status) {
-                    // Fallback key succeeded — is_hot_swapped = 1
-                    prep.executed_provider = config.id.clone();
-                    prep.fallback_targets.remove(0); // consume the one we just succeeded with so it's not reused
-                    return Ok((response, target.api_key_alias.clone(), 1u8, prep));
+                    info!(
+                        model = %prep.model,
+                        key_alias = %fallback.api_key_alias,
+                        "Fallback target succeeded — hot-swap complete"
+                    );
+                    prep.executed_provider = fallback_config.id.clone();
+                    prep.is_hot_swapped = 1;
+                    return Ok((response, fallback.api_key_alias.clone(), 1u8, prep));
                 }
                 warn!(
                     model = %prep.model,
-                    key_alias = %target.api_key_alias,
+                    key_alias = %fallback.api_key_alias,
                     status = status,
-                    "Provider key failed with retryable error, tripping circuit breaker and falling back"
+                    "Fallback target returned retryable status code — triggering circuit breaker"
                 );
-                // Trip the breaker — this key is blacklisted for 60 seconds.
-                let cb_key = circuit_breaker_key(&prep.tenant_id, &target.api_key_alias);
-                state.circuit_breaker.insert(cb_key, ()).await;
-                last_error = GatewayError::ResponseBuild(format!("Provider returned {}", status));
+                state
+                    .circuit_breaker
+                    .insert(cb_key, ())
+                    .await;
+
+                last_error = GatewayError::ResponseBuild(format!(
+                    "Fallback target {} HTTP {}",
+                    fallback.api_key_alias, status
+                ));
             }
             Err(e) => {
                 warn!(
                     model = %prep.model,
-                    key_alias = %target.api_key_alias,
+                    key_alias = %fallback.api_key_alias,
                     error = %e,
-                    "Provider key unreachable, tripping circuit breaker and falling back"
+                    "Fallback target network request failed — triggering circuit breaker"
                 );
-                // Trip the breaker for network-level failures too.
-                let cb_key = circuit_breaker_key(&prep.tenant_id, &target.api_key_alias);
-                state.circuit_breaker.insert(cb_key, ()).await;
+                state
+                    .circuit_breaker
+                    .insert(cb_key, ())
+                    .await;
+
                 last_error = GatewayError::UpstreamUnreachable(e);
             }
         }
-        prep.fallback_targets.remove(0); // Remove failed target
     }
 
-    error!("All configured keys for {} exhausted", prep.model);
+    error!(
+        model = %prep.model,
+        "All upstream targets failed (primary + all fallbacks)"
+    );
     Err(last_error)
+}
+
+pub async fn execute_upstream_request_simple(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    body_bytes: &mut [u8],
+    accept_header: &str,
+    strategy: RoutingStrategy,
+) -> Result<(reqwest::Response, String, u8), GatewayError> {
+    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
+    let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
+    Ok((resp, key, hot_swapped))
 }
 
 pub async fn route_chat_completion_with_fallback(
@@ -366,7 +410,7 @@ pub async fn route_chat_completion_with_fallback(
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy).await?;
+    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
@@ -381,6 +425,7 @@ pub fn build_provider_request(
     upstream_target_model: &str,
     body_bytes: &mut [u8],
     accept_header: &str,
+    test_scenario: Option<&str>,
 ) -> Result<reqwest::RequestBuilder, GatewayError> {
     let endpoint = if config.schema_format == SchemaFormat::Anthropic {
         format!("{}/messages", base_url)
@@ -409,10 +454,14 @@ pub fn build_provider_request(
         format!("{}/chat/completions", base_url)
     };
 
-    let builder = client
+    let mut builder = client
         .post(&endpoint)
         .header("Content-Type", "application/json")
         .header("Accept", accept_header);
+
+    if let Some(scen) = test_scenario {
+        builder = builder.header("X-Test-Scenario", scen);
+    }
 
     let request = match config.auth_scheme {
         AuthScheme::Bearer => builder.bearer_auth(api_key),
@@ -702,7 +751,7 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -716,10 +765,12 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
             pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
             budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),
@@ -788,6 +839,7 @@ mod tests {
             &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
+            None,
         )
         .await;
 
@@ -867,6 +919,7 @@ mod tests {
             &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
+            None,
         )
         .await;
 
@@ -928,7 +981,7 @@ mod tests {
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
         let prep =
-            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default)
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
                 .await
                 .unwrap();
 
@@ -979,7 +1032,7 @@ mod tests {
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
         let prep =
-            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default)
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
                 .await
                 .unwrap();
         let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
@@ -1033,6 +1086,7 @@ mod tests {
             "gemini-1.5-pro",
             &mut stream_body_mut,
             "*/*",
+            None,
         )
         .unwrap();
         let request_stream = builder_stream.build().unwrap();
@@ -1055,6 +1109,7 @@ mod tests {
             "gemini-1.5-pro",
             &mut non_stream_body_mut,
             "*/*",
+            None,
         )
         .unwrap();
         let request_non_stream = builder_non_stream.build().unwrap();
@@ -1134,6 +1189,7 @@ mod tests {
             &mut body_mut,
             "application/json",
             RoutingStrategy::Default,
+            None,
         )
         .await
         .unwrap();
@@ -1252,6 +1308,7 @@ mod tests {
             &mut body_mut,
             "application/json",
             RoutingStrategy::Default,
+            None,
         )
         .await
         .unwrap();

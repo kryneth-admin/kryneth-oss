@@ -670,6 +670,7 @@ pub async fn execute_proxy(
     is_free_tier: bool,
     req_extensions: &axum::http::Extensions,
     enable_compression: bool,
+    test_scenario: Option<&str>,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
 
@@ -743,28 +744,31 @@ pub async fn execute_proxy(
     let semantic_text_str = semantic_text.as_deref().unwrap_or("");
 
     // ── NEW PRECEDENCE RULE: Check Exact Cache BEFORE embedding ───────────────
-    if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
-        info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
-        return handle_cache_hit(
-            state,
-            cached_content,
-            tenant_id,
-            model_name,
-            raw_prompt,
-            semantic_text_str,
-            trace_ctx,
-            start_time,
-            is_streaming,
-            is_free_tier,
-            client_config.semantic_cache_enabled,
-            team_id,
-            api_key_alias,
-            agent_loops,
-        );
+    if test_scenario.is_none() {
+        if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
+            info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
+            return handle_cache_hit(
+                state,
+                cached_content,
+                tenant_id,
+                model_name,
+                raw_prompt,
+                semantic_text_str,
+                trace_ctx,
+                start_time,
+                is_streaming,
+                is_free_tier,
+                client_config.semantic_cache_enabled,
+                team_id,
+                api_key_alias,
+                agent_loops,
+            );
+        }
     }
 
     // Step 1: Speculatively generate embedding if semantic text exists
-    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled
+    let embedding_vector: Option<Vec<f32>> = if test_scenario.is_none()
+        && client_config.semantic_cache_enabled
         && state.semantic_cache.is_enabled()
     {
         if let Some(ref sem_text) = semantic_text {
@@ -785,7 +789,7 @@ pub async fn execute_proxy(
     let cache_future = {
         let embedding_vector = embedding_vector.clone();
         let semantic_text = semantic_text.clone();
-        let semantic_cache_enabled = client_config.semantic_cache_enabled;
+        let semantic_cache_enabled = client_config.semantic_cache_enabled && test_scenario.is_none();
         async move {
             if !semantic_cache_enabled {
                 return None;
@@ -826,6 +830,7 @@ pub async fn execute_proxy(
         &mut parse_buffer,
         accept_header,
         strategy,
+        test_scenario,
     );
 
     let (cache_result, prep_result) = tokio::join!(cache_future, prep_future);
@@ -1396,6 +1401,7 @@ fn handle_streaming_response(
                     &target.target_model,
                     &mut stream_buffer,
                     &prep.accept_header,
+                    None,
                 ) {
                     Ok(req) => req,
                     Err(e) => {
@@ -1435,16 +1441,14 @@ fn handle_streaming_response(
             }
 
             if !fallback_succeeded {
-                // All fallbacks exhausted or failed. Send a final SSE error representation and close.
-                let err_json = serde_json::json!({
-                    "error": {
-                        "message": "Stream interrupted and all fallbacks exhausted.",
-                        "type": "stream_interrupted",
-                        "code": "mid_stream_failure"
-                    }
-                });
-                let err_msg = format!("data: {}\n\n", err_json);
-                let _ = client_tx.send(Ok(bytes::Bytes::from(err_msg))).await;
+                // All fallbacks exhausted or failed. Send Err to client_tx to force HTTP stream abort.
+                tracing::error!("Stream interrupted and all fallbacks exhausted. Aborting stream connection.");
+                let _ = client_tx
+                    .send(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "Upstream mid-stream failure: all fallbacks exhausted",
+                    )))
+                    .await;
                 break;
             }
         }
@@ -1670,19 +1674,38 @@ async fn handle_buffered_response(
                 mcp_calls = results.len() as u32;
 
                 if !results.is_empty() {
-                    let tool_messages = crate::infrastructure::mcp_client::merge_results(
-                        results,
-                        enable_compression,
-                        &*adapter,
-                    );
+                    // Filter out PREVIOUS_ATTEMPT_UNKNOWN tool results before passing to LLM context
+                    // to prevent LLM hallucinations on retry failure strings.
+                    let safe_results: Vec<_> = results
+                        .into_iter()
+                        .filter(|r| {
+                            if r.content.contains("PREVIOUS_ATTEMPT_UNKNOWN") {
+                                tracing::warn!(
+                                    tool_name = %r.name,
+                                    "Dropping PREVIOUS_ATTEMPT_UNKNOWN tool result from LLM context to force hard-fail"
+                                );
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
 
-                    // Forward merged tool results to telemetry as structured context.
-                    let ctx_payload = serde_json::json!({
-                        "type": "mcp_tool_results",
-                        "tenant_id": tenant_id,
-                        "tool_messages": tool_messages,
-                    });
-                    state.telemetry.log_event(ctx_payload);
+                    if !safe_results.is_empty() {
+                        let tool_messages = crate::infrastructure::mcp_client::merge_results(
+                            safe_results,
+                            enable_compression,
+                            &*adapter,
+                        );
+
+                        // Forward merged tool results to telemetry as structured context.
+                        let ctx_payload = serde_json::json!({
+                            "type": "mcp_tool_results",
+                            "tenant_id": tenant_id,
+                            "tool_messages": tool_messages,
+                        });
+                        state.telemetry.log_event(ctx_payload);
+                    }
                 }
             }
         }
@@ -2433,7 +2456,7 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -2447,10 +2470,12 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: moka::future::Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
             pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
             budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
                 std::collections::HashMap::new(),
             )),
@@ -2555,6 +2580,7 @@ mod tests {
             false,
             &req_extensions,
             false,
+            None,
         )
         .await
         .unwrap();
@@ -2625,6 +2651,7 @@ mod tests {
             false,
             &req_extensions,
             false,
+            None,
         )
         .await;
 

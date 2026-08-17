@@ -1,0 +1,11 @@
+{
+  "name": "kryneth-e2e-whitebox-runner",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node suite.test.js"
+  },
+  "dependencies": {
+    "openai": "^4.0.0"
+  }
+}

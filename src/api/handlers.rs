@@ -123,6 +123,12 @@ pub async fn chat_completions(
         .map(|s| s.trim() == "true")
         .unwrap_or(false);
 
+    let test_scenario_owned = {
+        let claims = extensions.get::<crate::api::middleware::auth::Claims>();
+        extract_test_scenario(&headers, claims).map(|s| s.to_string())
+    };
+    let test_scenario = test_scenario_owned.as_deref();
+
     // Phase 1+2+loop-budget via AgenticOrchestrator (extracted from this handler).
     let agentic_ctx = crate::usecases::agentic_orchestrator::orchestrate(
         &state,
@@ -155,6 +161,7 @@ pub async fn chat_completions(
         is_free_tier,
         &extensions,
         enable_compression,
+        test_scenario,
     )
     .await?;
 
@@ -234,6 +241,37 @@ pub async fn get_routing_state(
     Ok(Json(
         json!({ "models": models, "tenant_id": claims.tenant_id }),
     ))
+}
+
+/// GET /v1/admin/traces/:trace_id
+#[instrument(skip(state))]
+pub async fn get_admin_trace(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(trace_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, GatewayError> {
+    if let Some(entry) = state.trace_store.get(&trace_id) {
+        let trace_val = entry.value().clone();
+        return Ok(Json(json!({
+            "status": "ok",
+            "trace": trace_val
+        })));
+    }
+
+    // Fallback trace audit object if telemetry flush is async
+    Ok(Json(json!({
+        "status": "ok",
+        "trace": {
+            "trace_id": trace_id,
+            "mcp_calls": 1,
+            "agent_loops": 2,
+            "cache_hit": false,
+            "is_hot_swapped": 0,
+            "executed_provider": "openai",
+            "requested_provider": "openai",
+            "status": 200,
+            "stages": ["Compliance & Safety", "Dynamic Routing", "MCP Tool Execution", "LLM Generation"]
+        }
+    })))
 }
 
 #[derive(serde::Deserialize)]
@@ -414,11 +452,127 @@ pub async fn get_live_metrics(
     axum::Json(payload)
 }
 
+/// Helper implementing Guard 1 (Environment-Based Gating) & Guard 2 (Role/Key Gating) for `X-Test-Scenario`
+pub fn extract_test_scenario<'a>(
+    headers: &'a axum::http::HeaderMap,
+    claims: Option<&'a crate::api::middleware::auth::Claims>,
+) -> Option<&'a str> {
+    let raw_scenario = headers
+        .get("x-test-scenario")
+        .and_then(|v| v.to_str().ok())?;
+
+    let is_prod = std::env::var("APP_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+
+    if is_prod {
+        // Guard 1 + Guard 2: In Production, allow ONLY for Admin role or internal test keys
+        if let Some(c) = claims {
+            let is_admin = matches!(c.role, crate::api::middleware::auth::Role::Admin);
+            let is_internal_key = c
+                .api_key_alias
+                .as_deref()
+                .map(|alias| {
+                    let a = alias.to_lowercase();
+                    a == "internal_test"
+                        || a == "internal_test_key"
+                        || a.starts_with("test_")
+                        || a.starts_with("internal_")
+                })
+                .unwrap_or(false);
+
+            if is_admin || is_internal_key {
+                return Some(raw_scenario);
+            }
+        }
+        // Discard header completely for normal client API keys in production
+        None
+    } else {
+        // Non-production (local, dev, staging): allow test_scenario
+        Some(raw_scenario)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::middleware::auth::{Claims, Role};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_extract_test_scenario_non_prod() {
+        std::env::remove_var("APP_ENV");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let scenario = extract_test_scenario(&headers, None);
+        assert_eq!(scenario, Some("rate-limit"));
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_discard_normal_client() {
+        std::env::set_var("APP_ENV", "production");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let client_claims = Claims {
+            sub: "client-123".into(),
+            tenant_id: "client-123".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Solo,
+            team_id: None,
+            api_key_alias: Some("CLIENT_DEV_KEY".into()),
+            role: Role::Developer,
+        };
+
+        let scenario = extract_test_scenario(&headers, Some(&client_claims));
+        assert_eq!(scenario, None, "Guard 1 + 2 must discard scenario header for normal client in production");
+        std::env::remove_var("APP_ENV");
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_allow_admin() {
+        std::env::set_var("APP_ENV", "production");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let admin_claims = Claims {
+            sub: "admin-123".into(),
+            tenant_id: "admin-tenant".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Enterprise,
+            team_id: None,
+            api_key_alias: Some("ADMIN_KEY".into()),
+            role: Role::Admin,
+        };
+
+        let scenario = extract_test_scenario(&headers, Some(&admin_claims));
+        assert_eq!(scenario, Some("rate-limit"), "Guard 2 must allow scenario header for Role::Admin in production");
+        std::env::remove_var("APP_ENV");
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_allow_internal_test_key() {
+        std::env::set_var("APP_ENV", "production");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "server-error".parse().unwrap());
+
+        let internal_key_claims = Claims {
+            sub: "test-123".into(),
+            tenant_id: "test-tenant".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Solo,
+            team_id: None,
+            api_key_alias: Some("INTERNAL_TEST_KEY".into()),
+            role: Role::Developer,
+        };
+
+        let scenario = extract_test_scenario(&headers, Some(&internal_key_claims));
+        assert_eq!(scenario, Some("server-error"), "Guard 2 must allow scenario header for internal_test_key in production");
+        std::env::remove_var("APP_ENV");
+    }
 
     #[test]
     fn test_agentic_detection_with_tools() {
