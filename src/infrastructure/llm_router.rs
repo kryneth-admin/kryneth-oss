@@ -173,7 +173,7 @@ pub async fn prep_upstream_request(
             } else if m.starts_with("llama-") {
                 tenant_models.get("llama-3.3-70b-versatile")
             } else {
-                tenant_models.values().next()
+                None
             }
         })
         .ok_or_else(|| {
