@@ -108,6 +108,18 @@ jobs:
                 schema_format: "openai"
             rate_limit_rpm: 1000
 
+          "agentic-test-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_AGENTIC_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
           "gpt-4o-mini":
             targets:
               - priority: 1

@@ -44,7 +44,7 @@ async function testMultiTurnAgenticPipeline() {
   // 1. Send completion request
   const response = await openai.chat.completions.create(
     {
-      model: 'gpt-4o',
+      model: 'agentic-test-model',
       messages: [{ role: 'user', content: 'What is the stock price of AMZN?' }],
       stream: false,
     },
