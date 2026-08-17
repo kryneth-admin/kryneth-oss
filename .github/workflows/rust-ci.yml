@@ -92,7 +92,121 @@ jobs:
           sleep 1
         done
 
+    - name: Generate Mock routing.yaml for E2E Tests
+      run: |
+        cat <<EOF > routing.yaml
+        "00000000-0000-0000-0000-000000000000":
+          "gpt-4o":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_API_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "gpt-4o-mini":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_API_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o-mini"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "rate-limit-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "RATE_LIMIT_KEY"
+                api_key: "mock-key-rate-limit"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "claude-3-5-sonnet":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "ANTHROPIC_API_KEY"
+                api_key: "mock-anthropic-key"
+                provider_name: "anthropic"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "claude-3-5-sonnet-20241022"
+                schema_format: "anthropic"
+            rate_limit_rpm: 1000
+
+          "gemini-1.5-pro":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "GEMINI_API_KEY"
+                api_key: "mock-gemini-key"
+                provider_name: "gemini"
+                base_url: "http://127.0.0.1:9090/v1beta/models"
+                target_model: "gemini-1.5-pro"
+                schema_format: "gemini"
+            rate_limit_rpm: 1000
+
+          "deepseek-r1":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "DEEPSEEK_API_KEY"
+                api_key: "mock-deepseek-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "deepseek-r1"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "cohere-command-r":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "COHERE_API_KEY"
+                api_key: "mock-cohere-key"
+                provider_name: "cohere"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "command-r-plus"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "failover-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "PRIMARY_FAIL_KEY"
+                api_key: "mock-key-fail"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1/fail-primary"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+              - priority: 2
+                weight: 100
+                api_key_alias: "SECONDARY_SUCCESS_KEY"
+                api_key: "mock-key-success"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o-mini"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+        EOF
+
     - name: Start Kryneth AI Gateway (Port 8080)
+      env:
+        KRYNETH_VALID_KEYS: "ke_live_test_key,ke_test_key,re_live_test_key"
+        ROUTING_CONFIG_PATH: "routing.yaml"
+        JWT_SECRET: "dummy_ci_secret_key_32_bytes_long_1234567890"
+        APP_ENV: "development"
       run: |
         nohup ./target/debug/kryneth_gateway > gateway.log 2>&1 &
         echo "Waiting for Kryneth AI Gateway health on port 8080..."
