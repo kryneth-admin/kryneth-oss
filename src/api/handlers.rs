@@ -80,11 +80,12 @@ pub async fn chat_completions(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant_id = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .unwrap_or("anonymous");
+    let tenant_id_owned = extensions
+        .get::<crate::api::middleware::auth::Claims>()
+        .map(|c| c.tenant_id.clone())
+        .or_else(|| headers.get("x-tenant-id").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+    let tenant_id = tenant_id_owned.as_str();
     tracing::debug!(
         "CHAT_COMPLETIONS: TenantID: '{}', ModelName: '{}'",
         tenant_id,
