@@ -149,15 +149,39 @@ pub async fn prep_upstream_request(
     // 3. Lookup the model for the specific tenant
     tracing::debug!("LOOKUP: Tenant: '{}', Model: '{}'", tenant_id, model);
 
-    let tenant_models = routing_guard.get(tenant_id).ok_or_else(|| {
-        GatewayError::ModelNotConfigured(format!("No routing config for tenant '{}'", tenant_id))
-    })?;
-    let model_config = tenant_models.get(model).ok_or_else(|| {
-        GatewayError::ModelNotConfigured(format!(
-            "Model '{}' not configured for tenant '{}'",
-            model, tenant_id
-        ))
-    })?;
+    let tenant_models = routing_guard
+        .get(tenant_id)
+        .or_else(|| routing_guard.get("00000000-0000-0000-0000-000000000000"))
+        .ok_or_else(|| {
+            GatewayError::ModelNotConfigured(format!("No routing config for tenant '{}'", tenant_id))
+        })?;
+
+    let model_config = tenant_models
+        .get(model)
+        .or_else(|| {
+            let m = model.trim().to_lowercase();
+            if m.starts_with("gpt-") {
+                tenant_models.get("gpt-4o")
+            } else if m.starts_with("claude-") {
+                tenant_models.get("claude-3-5-sonnet")
+            } else if m.starts_with("gemini-") {
+                tenant_models.get("gemini-1.5-pro")
+            } else if m.starts_with("deepseek-") {
+                tenant_models.get("deepseek-r1")
+            } else if m.starts_with("cohere-") || m.starts_with("command-") {
+                tenant_models.get("cohere-command-r")
+            } else if m.starts_with("llama-") {
+                tenant_models.get("llama-3.3-70b-versatile")
+            } else {
+                tenant_models.values().next()
+            }
+        })
+        .ok_or_else(|| {
+            GatewayError::ModelNotConfigured(format!(
+                "Model '{}' not configured for tenant '{}'",
+                model, tenant_id
+            ))
+        })?;
 
     if model_config.targets.is_empty() {
         warn!("No targets configured for model {}", model);
