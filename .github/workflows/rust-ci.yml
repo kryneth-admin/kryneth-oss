@@ -60,28 +60,49 @@ jobs:
         python -m pip install --upgrade pip
         pip install fastapi uvicorn anyio pydantic requests
 
-    - name: Set up Node.js 20
+    - name: Set up Node.js 22
       uses: actions/setup-node@v4
       with:
-        node-version: '20'
+        node-version: '22'
 
     - name: Set up Rust Toolchain
       uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
 
     - name: Install Protoc
       uses: arduino/setup-protoc@v3
       with:
         repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Pre-build Kryneth Gateway Binary
+      run: |
+        cargo build --bin kryneth_gateway
+
     - name: Start Python Upstream Mock Server (Port 9090)
       run: |
-        python mock_server/main.py &
-        sleep 2
+        nohup python mock_server/main.py > mock_server.log 2>&1 &
+        echo "Waiting for Python Mock Server on port 9090..."
+        for i in {1..30}; do
+          if curl -s http://localhost:9090/health > /dev/null 2>&1 || curl -s http://localhost:9090/v1/chat/completions > /dev/null 2>&1; then
+            echo "✅ Python Mock Server is listening on port 9090!"
+            break
+          fi
+          sleep 1
+        done
 
-    - name: Build and Start Kryneth AI Gateway (Port 8080)
+    - name: Start Kryneth AI Gateway (Port 8080)
       run: |
-        cargo run --bin kryneth_gateway &
-        sleep 5
+        nohup ./target/debug/kryneth_gateway > gateway.log 2>&1 &
+        echo "Waiting for Kryneth AI Gateway health on port 8080..."
+        for i in {1..60}; do
+          if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+            echo "✅ Kryneth AI Gateway is ready on http://localhost:8080!"
+            break
+          fi
+          sleep 1
+        done
 
     - name: Run 50+ Scenario Integration Suite
       run: |
@@ -94,3 +115,11 @@ jobs:
         cd e2e_runner
         npm install
         npm test
+
+    - name: Dump Logs on Failure
+      if: failure()
+      run: |
+        echo "=== KRYNETH GATEWAY LOGS ==="
+        cat gateway.log || true
+        echo "=== PYTHON MOCK SERVER LOGS ==="
+        cat mock_server.log || true
