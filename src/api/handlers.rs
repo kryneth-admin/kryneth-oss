@@ -457,40 +457,50 @@ pub fn extract_test_scenario<'a>(
     headers: &'a axum::http::HeaderMap,
     claims: Option<&'a crate::api::middleware::auth::Claims>,
 ) -> Option<&'a str> {
+    let env_var = std::env::var("APP_ENV").ok();
+    extract_test_scenario_with_env(headers, claims, env_var.as_deref())
+}
+
+pub fn extract_test_scenario_with_env<'a>(
+    headers: &'a axum::http::HeaderMap,
+    claims: Option<&crate::api::middleware::auth::Claims>,
+    app_env: Option<&str>,
+) -> Option<&'a str> {
     let raw_scenario = headers
         .get("x-test-scenario")
         .and_then(|v| v.to_str().ok())?;
 
-    let is_prod = std::env::var("APP_ENV")
+    let is_prod = app_env
         .map(|v| v.eq_ignore_ascii_case("production"))
         .unwrap_or(false);
 
-    if is_prod {
-        // Guard 1 + Guard 2: In Production, allow ONLY for Admin role or internal test keys
-        if let Some(c) = claims {
-            let is_admin = matches!(c.role, crate::api::middleware::auth::Role::Admin);
-            let is_internal_key = c
-                .api_key_alias
-                .as_deref()
-                .map(|alias| {
-                    let a = alias.to_lowercase();
-                    a == "internal_test"
-                        || a == "internal_test_key"
-                        || a.starts_with("test_")
-                        || a.starts_with("internal_")
-                })
-                .unwrap_or(false);
-
-            if is_admin || is_internal_key {
-                return Some(raw_scenario);
-            }
-        }
-        // Discard header completely for normal client API keys in production
-        None
-    } else {
-        // Non-production (local, dev, staging): allow test_scenario
-        Some(raw_scenario)
+    if !is_prod {
+        // Non-production (local, dev, staging): always allow test_scenario
+        return Some(raw_scenario);
     }
+
+    // Production: Guard 1 + Guard 2 - allow ONLY for Admin role or internal test keys
+    if let Some(c) = claims {
+        let is_admin = matches!(c.role, crate::api::middleware::auth::Role::Admin);
+        let is_internal_key = c
+            .api_key_alias
+            .as_deref()
+            .map(|alias| {
+                let a = alias.to_lowercase();
+                a == "internal_test"
+                    || a == "internal_test_key"
+                    || a.starts_with("test_")
+                    || a.starts_with("internal_")
+            })
+            .unwrap_or(false);
+
+        if is_admin || is_internal_key {
+            return Some(raw_scenario);
+        }
+    }
+
+    // Discard header for normal client API keys in production
+    None
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -503,17 +513,15 @@ mod tests {
 
     #[test]
     fn test_extract_test_scenario_non_prod() {
-        std::env::remove_var("APP_ENV");
         let mut headers = HeaderMap::new();
         headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
 
-        let scenario = extract_test_scenario(&headers, None);
+        let scenario = extract_test_scenario_with_env(&headers, None, None);
         assert_eq!(scenario, Some("rate-limit"));
     }
 
     #[test]
     fn test_extract_test_scenario_prod_discard_normal_client() {
-        std::env::set_var("APP_ENV", "production");
         let mut headers = HeaderMap::new();
         headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
 
@@ -527,14 +535,12 @@ mod tests {
             role: Role::Developer,
         };
 
-        let scenario = extract_test_scenario(&headers, Some(&client_claims));
+        let scenario = extract_test_scenario_with_env(&headers, Some(&client_claims), Some("production"));
         assert_eq!(scenario, None, "Guard 1 + 2 must discard scenario header for normal client in production");
-        std::env::remove_var("APP_ENV");
     }
 
     #[test]
     fn test_extract_test_scenario_prod_allow_admin() {
-        std::env::set_var("APP_ENV", "production");
         let mut headers = HeaderMap::new();
         headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
 
@@ -548,14 +554,12 @@ mod tests {
             role: Role::Admin,
         };
 
-        let scenario = extract_test_scenario(&headers, Some(&admin_claims));
+        let scenario = extract_test_scenario_with_env(&headers, Some(&admin_claims), Some("production"));
         assert_eq!(scenario, Some("rate-limit"), "Guard 2 must allow scenario header for Role::Admin in production");
-        std::env::remove_var("APP_ENV");
     }
 
     #[test]
     fn test_extract_test_scenario_prod_allow_internal_test_key() {
-        std::env::set_var("APP_ENV", "production");
         let mut headers = HeaderMap::new();
         headers.insert("x-test-scenario", "server-error".parse().unwrap());
 
@@ -569,9 +573,8 @@ mod tests {
             role: Role::Developer,
         };
 
-        let scenario = extract_test_scenario(&headers, Some(&internal_key_claims));
+        let scenario = extract_test_scenario_with_env(&headers, Some(&internal_key_claims), Some("production"));
         assert_eq!(scenario, Some("server-error"), "Guard 2 must allow scenario header for internal_test_key in production");
-        std::env::remove_var("APP_ENV");
     }
 
     #[test]
