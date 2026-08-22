@@ -102,8 +102,10 @@ Enforces rate quotas to prevent upstream model exhaustion or denial-of-service.
 ### Stage 4: Hybrid L1/L2 Semantic Cache Check
 Searches the cache layers (L1 local Moka cache and L2 gRPC vector cache) to determine if an identical or semantically similar query was recently answered. On a hit, Kryneth returns the response instantly.
 
-### Stage 5: Dynamic Upstream Routing & Priority Failover
-Evaluates prioritized targets from `routing.yaml`. If the primary provider fails, Kryneth performs speculative recovery and hot-swaps to secondary targets seamlessly in **~0.37ms**.
+### Stage 5: Dynamic Upstream Routing & Mid-Stream SSE Failover Stitching
+Evaluates prioritized targets from `routing.yaml`. If the primary provider fails before or during execution, Kryneth performs speculative recovery and hot-swaps to secondary targets seamlessly:
+* **Pre-Request Failover**: Hot-swaps target providers in **~0.37ms** if a primary endpoint returns HTTP 5xx or connection errors.
+* **Mid-Stream SSE Failover Stitching**: For active streaming responses (Server-Sent Events), Kryneth executes an allocation-free sliding window scanner (`has_error_signature`) over raw byte chunks to detect upstream error signatures (such as `"rate_limit"`, `"insufficient_funds"`, or `"billing_limit"`). If an error is detected mid-stream, Kryneth aborts the failing provider connection, consumes the next fallback target, and seamlessly stitches the fallback SSE stream to the active client HTTP response without dropping the client connection or restarting the generation.
 
 ### Stage 6: Pre/Post-Request Compliance & Policy Enforcer
 Passes payloads to the compliance engine to detect and redact PII and block prompt injections.

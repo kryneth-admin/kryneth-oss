@@ -7,14 +7,44 @@ To prevent autonomous agents from running out of bounds, repeating failing actio
 
 ---
 
-## 1. Runaway Loop Interception
+## 1. Runaway Loop Interception & Ephemeral Evasion Trap
 
-If an agent encounters a parsing error or database timeout, it may enter an infinite loop, repeating the exact same execution parameters and draining your API budget.
+If an agent encounters a parsing error, database timeout, or unhandled exception, it may enter an infinite loop, repeating identical tool execution parameters and draining your API budget.
 
-### Hashing Signature Trap
--   For every outgoing tool execution, Kryneth generates a deterministic hash signature of the tool name and argument JSON string using the fast `ahash` algorithm.
--   If the same signature repeat count exceeds the threshold (default: `5`) within a 60-second sliding window, Kryneth intercepts the request locally.
--   It returns an HTTP `429 Too Many Requests` directly, preventing the transaction from consuming upstream LLM tokens.
+### Unified Tool Call Abstraction (`UnifiedToolCall`)
+To maintain universal loop protection regardless of which LLM provider or SDK powers the agent, Kryneth normalizes heterogeneous tool payloads into a unified internal representation (`UnifiedToolCall` in `usecases/behavior_guard.rs`):
+
+```rust
+struct UnifiedToolCall {
+    pub name: String,
+    pub semantic_hash: u64,
+}
+```
+
+* **Multi-Provider Normalization**: Seamlessly ingests OpenAI/Groq `function` objects (`name` + `arguments`), Google Gemini `functionCall` nodes (`name` + `args`), and Anthropic/Cohere `input`/`parameters` structures into a standardized evaluation pipeline.
+
+### Ephemeral Key Evasion Trap (`hash_borrowed_value`)
+Rogue or looping LLM agents occasionally attempt to evade string-hashing loop detectors by injecting dynamic, non-functional properties into their tool argument payloads (e.g., adding `timestamp: "17:31:00"`, `nonce: 12345`, or dynamic `uuid` fields) or reordering JSON keys.
+
+Kryneth neutralizes these evasion tactics through the **Ephemeral Key Evasion Trap** (`hash_borrowed_value`):
+
+1. **Ephemeral Key Blacklisting**: During zero-allocation JSON traversal (`simd_json::BorrowedValue`), Kryneth explicitly strips blacklisted ephemeral keys:
+   ```rust
+   if !["timestamp", "nonce", "uuid", "stream", "session_id", "time"].contains(&k_str) {
+       // hash key-value pair
+   }
+   ```
+   *Note: Core functional identifiers like `id` (e.g. `customer_id` or `ticket_id`) are preserved to avoid false loop triggers on distinct entity queries.*
+
+2. **Order-Independent XOR Combination**: Object key-value hashes are combined using bitwise XOR operations (`obj_hash ^= kv_hasher.finish()`). Reordering JSON keys produces an identical `semantic_hash`.
+
+3. **Numeric Coercion**: Integer and floating-point representations (e.g., `5` vs `5.0`) are coerced into identical 64-bit IEEE 754 bit representations (`(*n as f64).to_bits()`), preventing precision format changes from evading hash checks.
+
+### Hashing Signature Trap & Enforcement
+- For every outgoing tool call, Kryneth calculates a composite loop key:
+  $$\text{LoopKey} = \text{AHasher}(\text{session\_id} \parallel \text{tool\_name} \parallel \text{semantic\_hash})$$
+- If the repeat count for a specific `LoopKey` exceeds `MAX_IDENTICAL_TOOL_CALLS` (default: `5`) within a 60-second sliding window stored in `AppState::agent_guardian_cache` (powered by `Moka`), Kryneth intercepts the call locally.
+- It returns a structured `GatewayError::AgentRunawayLoop` (`HTTP 429 Too Many Requests`), terminating the infinite loop before it consumes upstream tokens.
 
 ---
 

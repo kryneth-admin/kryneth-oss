@@ -66,7 +66,56 @@ After calculating the EMAs, the worker writes the ranked providers to a Redis So
 
 ---
 
-## 4. Configuration Reference
+## 4. Mid-Stream Error Detection & SSE Failover Stitching
+
+When routing streaming requests (Server-Sent Events / SSE) across low-latency or cost-optimized providers, an upstream provider may encounter a mid-stream failure—such as a sudden rate-limit error, quota exhaustion, or internal server exception—halfway through emitting tokens. 
+
+Simply dropping the connection forces the AI agent to restart the entire generation from scratch. Kryneth solves this with **Mid-Stream Error Detection & SSE Failover Stitching** (`handle_streaming_response` in `usecases/proxy.rs`).
+
+```mermaid
+sequenceDiagram
+    participant Client as AI Agent Client
+    participant GW as Kryneth Gateway
+    participant Primary as Primary Provider (Groq)
+    participant Fallback as Fallback Provider (OpenAI)
+
+    Client->>GW: Request Streaming Completion
+    GW->>Primary: Open SSE Stream
+    Primary-->>GW: Chunk 1: "data: {\"content\": \"Hello\"}"
+    GW-->>Client: Forward Chunk 1
+    Primary-->>GW: Chunk 2: "data: {\"error\": \"rate_limit\"}"
+    Note over GW: has_error_signature() triggers!<br/>Abort Primary, preserve Client HTTP 200
+    GW->>Fallback: Open Fallback SSE Stream
+    Fallback-->>GW: Chunk 1: "data: {\"content\": \" world!\"}"
+    GW-->>Client: Seamlessly Stitch Chunk 1 to active connection
+```
+
+### Zero-Allocation Sliding Window Scanner (`has_error_signature`)
+During active SSE streaming, Kryneth inspects every raw chunk using an allocation-free sliding window scanner:
+
+```rust
+fn has_error_signature(chunk: &[u8]) -> bool {
+    chunk.windows(7).any(|w| w == b"\"error\"")
+        || chunk.windows(12).any(|w| w == b"\"rate_limit\"")
+        || chunk.windows(20).any(|w| w == b"\"insufficient_funds\"")
+        || chunk.windows(15).any(|w| w == b"\"billing_limit\"")
+}
+```
+
+* **Zero Memory Overhead**: `.windows()` byte scanning evaluates chunks in RAM without string allocations or JSON parsing costs on the hot streaming path.
+* **Instant Abort**: Immediately halts stream forwarding the moment an error signature matches, suppressing upstream error JSON from contaminating client output.
+
+### Seamless Stream Failover Stitching
+When an error signature or mid-stream disconnect is detected:
+1. **Upstream Abort**: Kryneth closes the failing upstream connection (`active_stream`).
+2. **Fallback Target Consumption**: The worker thread pops the next target from `prep.fallback_targets`.
+3. **Seamless Stream Stitching**: Opens a new SSE stream to the fallback provider (`build_provider_request`) and pipes its byte stream into the active client channel (`client_tx`).
+4. **Telemetry Updating**: Updates atomic telemetry markers (`shared_executed_provider`, `shared_is_hot_swapped`) to track hot-swapped mid-stream fallbacks without breaking existing trace metrics.
+5. **Zero Disconnect**: The client HTTP connection remains open, receiving an uninterrupted, stitched stream of tokens.
+
+---
+
+## 5. Configuration Reference
 
 Configure these environment variables in your deployment setup:
 
@@ -74,3 +123,4 @@ Configure these environment variables in your deployment setup:
 | :--- | :--- | :--- | :--- |
 | `LATENCY_WORKER_INTERVAL_SECS` | **Optional** | `10` | Frequency in seconds at which the background latency worker checks ClickHouse logs. |
 | `TRACER_URL` | **Optional** | `http://localhost:8082` | HTTP endpoint of the tracer service. |
+
