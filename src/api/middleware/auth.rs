@@ -253,6 +253,7 @@ pub async fn require_admin(
 // ── RBAC: require_team_plan ───────────────────────────────────────────────────
 
 /// Axum middleware that restricts features to Team or Enterprise plans.
+#[allow(clippy::result_large_err)]
 pub async fn require_team_plan(
     Extension(claims): Extension<Claims>,
     req: Request<Body>,
