@@ -13,7 +13,7 @@ env.local
 env.*.local
 routing.yaml
 rustup-init.exe
-
+git_mcp_server/
 
 # IDE
 .vscode/

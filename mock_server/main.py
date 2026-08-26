@@ -107,6 +107,51 @@ async def generate_sse_tool_call():
 
     yield "data: [DONE]\n\n"
 
+async def generate_sse_github_tool_call():
+    """Generates an SSE stream containing a search_repositories tool call invocation."""
+    chunks = [
+        {
+            "id": "chatcmpl-mock-tc-github",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_github_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "search_repositories",
+                                    "arguments": '{"query": "kryneth"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-mock-tc-github",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        },
+    ]
+
+    for chunk in chunks:
+        yield f"data: {json.dumps(chunk)}\n\n"
+        await asyncio.sleep(0.05)
+
+    yield "data: [DONE]\n\n"
+
 async def generate_sse_mid_stream_crash():
     """Emits 2 valid chunks then intentionally aborts connection without [DONE]."""
     chunks = [
@@ -276,6 +321,43 @@ async def chat_completions(
             generate_sse_tool_call(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
+
+    if scenario == "github-tool-call":
+        logger.info("Returning static (buffered) github-tool-call response")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": "chatcmpl-mock-tc-github",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_github_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_repositories",
+                                        "arguments": "{\"query\": \"kryneth\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 12,
+                    "total_tokens": 22
+                }
+            }
         )
 
     if scenario == "deepseek-thinking":

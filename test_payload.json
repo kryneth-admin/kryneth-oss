@@ -1,0 +1,28 @@
+{
+  "model": "agentic-test-model",
+  "messages": [
+    {
+      "role": "user",
+      "content": "List my github repositories."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_repositories",
+        "description": "Search for GitHub repositories using a query string.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search query like language:rust kryneth"
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ]
+}
