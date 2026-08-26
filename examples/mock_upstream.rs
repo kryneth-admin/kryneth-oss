@@ -48,8 +48,8 @@ async fn main() {
 }
 
 async fn handle_compliance_redact(Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
-    // Return the payload back as-is to simulate successful redaction
-    Json(payload)
+    // Return the payload wrapped in sanitized_payload to simulate successful redaction
+    Json(json!({ "sanitized_payload": payload }))
 }
 
 async fn handle_chat_completions(Json(payload): Json<ChatRequest>) -> impl IntoResponse {

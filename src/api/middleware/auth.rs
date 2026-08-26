@@ -67,6 +67,12 @@ pub struct Claims {
     /// The tenant's account type. Defaults to `Solo` if missing from older JWTs.
     #[serde(default)]
     pub account_type: AccountType,
+    /// Optional team scope identifier
+    #[serde(default)]
+    pub team_id: Option<String>,
+    /// Optional API key alias for budget checks and telemetry logging
+    #[serde(default)]
+    pub api_key_alias: Option<String>,
 }
 
 // ── JWT source discriminant ───────────────────────────────────────────────────
@@ -128,6 +134,8 @@ pub async fn auth_middleware(
                 exp: 0,
                 role: Role::Admin,
                 account_type: AccountType::Solo,
+                team_id: None,
+                api_key_alias: None,
             };
             let mut req = req;
             req.headers_mut().insert(
@@ -151,7 +159,11 @@ pub async fn auth_middleware(
     if let Some(auth_header) = req.headers().get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
             if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                if token.starts_with("re_live_") {
+                if token.starts_with("ke_live_")
+                    || token.starts_with("ke_test_")
+                    || token.starts_with("re_live_")
+                    || token.starts_with("re_test_")
+                {
                     token_opt = Some((token.to_string(), TokenKind::ApiKey));
                 } else {
                     token_opt = Some((
@@ -168,7 +180,11 @@ pub async fn auth_middleware(
     if token_opt.is_none() {
         if let Some(key_header) = req.headers().get("x-api-key") {
             if let Ok(token) = key_header.to_str() {
-                if token.starts_with("re_live_") {
+                if token.starts_with("ke_live_")
+                    || token.starts_with("ke_test_")
+                    || token.starts_with("re_live_")
+                    || token.starts_with("re_test_")
+                {
                     token_opt = Some((token.to_string(), TokenKind::ApiKey));
                 }
             }
@@ -237,6 +253,7 @@ pub async fn require_admin(
 // ── RBAC: require_team_plan ───────────────────────────────────────────────────
 
 /// Axum middleware that restricts features to Team or Enterprise plans.
+#[allow(clippy::result_large_err)]
 pub async fn require_team_plan(
     Extension(claims): Extension<Claims>,
     req: Request<Body>,
@@ -313,12 +330,28 @@ async fn handle_jwt(
         }
     }
 
-    let claims = verify_jwt(token)?;
+    let mut claims = verify_jwt(token)?;
 
     let tenant_id = Uuid::parse_str(&claims.tenant_id).map_err(|_| {
         tracing::warn!("Invalid UUID in tenant_id claim");
         StatusCode::UNAUTHORIZED
     })?;
+
+    if claims.team_id.is_none() {
+        claims.team_id = req
+            .headers()
+            .get("x-team-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string());
+    }
+
+    if claims.api_key_alias.is_none() {
+        claims.api_key_alias = req
+            .headers()
+            .get("x-api-key-alias")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string());
+    }
 
     req.headers_mut().insert(
         "x-tenant-id",
@@ -355,6 +388,18 @@ async fn handle_api_key(
         _ => AccountType::Solo,
     };
 
+    let team_id = req
+        .headers()
+        .get("x-team-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+
+    let api_key_alias = req
+        .headers()
+        .get("x-api-key-alias")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+
     req.headers_mut().insert(
         "x-tenant-id",
         axum::http::HeaderValue::from_str(&tenant_id_str)
@@ -368,6 +413,8 @@ async fn handle_api_key(
         exp: 0,
         role: Role::Developer,
         account_type,
+        team_id,
+        api_key_alias,
     });
 
     Ok(next.run(req).await)

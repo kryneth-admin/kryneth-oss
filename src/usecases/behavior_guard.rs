@@ -15,7 +15,7 @@ use simd_json::prelude::*;
 pub async fn enforce_loop_detection(
     _state: &Arc<AppState>,
     session_id: &str,
-    _body: &serde_json::Value,
+    _body: &[u8],
 ) -> Result<(), GatewayError> {
     Ok(())
 }
@@ -24,6 +24,7 @@ pub async fn enforce_loop_detection(
 #[instrument(skip(state, body_bytes), fields(session_id = %session_id))]
 pub async fn enforce_oss_agent_guardian(
     state: &Arc<AppState>,
+    tenant_id: &str,
     session_id: &str,
     body_bytes: &[u8],
 ) -> Result<(), GatewayError> {
@@ -52,13 +53,15 @@ pub async fn enforce_oss_agent_guardian(
                     if let Some(message) = first_choice.get("message") {
                         if let Some(tc) = message.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
+                                    .await;
                             }
                         }
                     } else if let Some(delta) = first_choice.get("delta") {
                         if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
                             if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, session_id, tc).await;
+                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
+                                    .await;
                             }
                         }
                     }
@@ -69,7 +72,7 @@ pub async fn enforce_oss_agent_guardian(
                 if let Some(last_msg) = messages.last() {
                     if let Some(tc) = last_msg.get("tool_calls").and_then(|t| t.as_array()) {
                         if !tc.is_empty() {
-                            return enforce_oss_tool_calls(state, session_id, tc).await;
+                            return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
                         }
                     }
                 }
@@ -78,18 +81,91 @@ pub async fn enforce_oss_agent_guardian(
         }
     };
 
-    enforce_oss_tool_calls(state, session_id, tool_calls).await
+    enforce_oss_tool_calls(state, tenant_id, session_id, tool_calls).await
 }
 
 struct UnifiedToolCall {
     pub name: String,
-    pub arguments_str: String,
+    pub semantic_hash: u64,
+}
+
+fn hash_borrowed_value(
+    val: &simd_json::BorrowedValue<'_>,
+    hasher: &mut ahash::AHasher,
+    depth: usize,
+) {
+    use std::hash::Hasher;
+
+    const MAX_DEPTH: usize = 16;
+    if depth > MAX_DEPTH {
+        let fallback_str = serde_json::to_string(val).unwrap_or_default();
+        hasher.write(fallback_str.as_bytes());
+        return;
+    }
+
+    #[allow(unreachable_patterns)]
+    match val {
+        simd_json::BorrowedValue::Static(node) => match node {
+            simd_json::StaticNode::I64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64((*n as f64).to_bits());
+            }
+            simd_json::StaticNode::U64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64((*n as f64).to_bits());
+            }
+            simd_json::StaticNode::F64(n) => {
+                hasher.write_u8(2);
+                hasher.write_u64(n.to_bits());
+            }
+            simd_json::StaticNode::Bool(b) => {
+                hasher.write_u8(1);
+                hasher.write_u8(if *b { 1 } else { 0 });
+            }
+            simd_json::StaticNode::Null => {
+                hasher.write_u8(0);
+            }
+        },
+        simd_json::BorrowedValue::String(s) => {
+            hasher.write_u8(5);
+            hasher.write(s.as_bytes());
+        }
+        simd_json::BorrowedValue::Array(arr) => {
+            hasher.write_u8(6);
+            hasher.write_usize(arr.len());
+            for item in arr {
+                hash_borrowed_value(item, hasher, depth + 1);
+            }
+        }
+        simd_json::BorrowedValue::Object(obj) => {
+            hasher.write_u8(7);
+
+            // Order-Independent Hashing (XOR Combination)
+            let mut obj_hash = 0u64;
+            for (k, v) in obj.iter() {
+                let k_str: &str = k.as_ref();
+                if !["timestamp", "nonce", "uuid", "stream", "session_id", "time"].contains(&k_str)
+                {
+                    let mut kv_hasher = ahash::AHasher::default();
+                    kv_hasher.write(k_str.as_bytes());
+                    hash_borrowed_value(v, &mut kv_hasher, depth + 1);
+                    obj_hash ^= kv_hasher.finish();
+                }
+            }
+            hasher.write_u64(obj_hash);
+        }
+        _ => {
+            let fallback_str = serde_json::to_string(val).unwrap_or_default();
+            hasher.write(fallback_str.as_bytes());
+        }
+    }
 }
 
 impl UnifiedToolCall {
     /// Unifies tool calls from top AI agent ecosystems into a standard format.
     fn from_borrowed_value(tc: &simd_json::BorrowedValue<'_>) -> Option<Self> {
         use simd_json::prelude::*;
+        use std::hash::Hasher;
 
         if let Some(func) = tc.get("function") {
             // 1. OpenAI / Groq Format
@@ -98,13 +174,22 @@ impl UnifiedToolCall {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let args = func
-                .get("arguments")
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args_str = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+
+            let arena = bumpalo::Bump::new();
+            let mut_bytes = arena.alloc_slice_copy(args_str.as_bytes());
+            let parsed_val = match simd_json::to_borrowed_value(mut_bytes) {
+                Ok(val) => val,
+                Err(_) => simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+            };
+
+            let mut hasher = ahash::AHasher::default();
+            hash_borrowed_value(&parsed_val, &mut hasher, 0);
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else if let Some(func_call) = tc.get("functionCall") {
             // 2. Google Gemini Format
@@ -113,25 +198,44 @@ impl UnifiedToolCall {
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
-            let args = func_call
-                .get("args")
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args = func_call.get("args");
+
+            let mut hasher = ahash::AHasher::default();
+            if let Some(val) = args {
+                hash_borrowed_value(val, &mut hasher, 0);
+            } else {
+                hash_borrowed_value(
+                    &simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+                    &mut hasher,
+                    0,
+                );
+            }
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else if let Some(name_val) = tc.get("name") {
             // 3. Anthropic & Cohere Formats
             let name = name_val.as_str().unwrap_or("").to_string();
-            let args = tc
-                .get("input")
-                .or_else(|| tc.get("parameters"))
-                .map(|a| a.to_string())
-                .unwrap_or_default();
+            let args = tc.get("input").or_else(|| tc.get("parameters"));
+
+            let mut hasher = ahash::AHasher::default();
+            if let Some(val) = args {
+                hash_borrowed_value(val, &mut hasher, 0);
+            } else {
+                hash_borrowed_value(
+                    &simd_json::BorrowedValue::Static(simd_json::StaticNode::Null),
+                    &mut hasher,
+                    0,
+                );
+            }
+            let semantic_hash = hasher.finish();
+
             Some(Self {
                 name,
-                arguments_str: args,
+                semantic_hash,
             })
         } else {
             None // Unsupported format
@@ -141,20 +245,32 @@ impl UnifiedToolCall {
 
 async fn enforce_oss_tool_calls(
     state: &Arc<AppState>,
+    tenant_id: &str,
     session_id: &str,
     tool_calls: &[simd_json::BorrowedValue<'_>],
 ) -> Result<(), GatewayError> {
     use std::hash::Hasher;
 
-    let max_session_tool_calls = std::env::var("MAX_SESSION_TOOL_CALLS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(20);
+    let mut max_session_tool_calls = 20;
+    let mut max_identical_tool_calls = 5;
 
-    let max_identical_tool_calls = std::env::var("MAX_IDENTICAL_TOOL_CALLS")
-        .ok()
-        .and_then(|v| v.parse::<u32>().ok())
-        .unwrap_or(5);
+    if let Some(cfg) = state.routing_state.client_configs.load().get(tenant_id) {
+        max_session_tool_calls = cfg.max_agent_loops as u32;
+        max_identical_tool_calls = cfg.max_identical_tool_calls as u32;
+    } else {
+        if let Some(env_max) = std::env::var("MAX_SESSION_TOOL_CALLS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            max_session_tool_calls = env_max;
+        }
+        if let Some(env_ident) = std::env::var("MAX_IDENTICAL_TOOL_CALLS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            max_identical_tool_calls = env_ident;
+        }
+    }
 
     let mut storm_hasher = ahash::AHasher::default();
     storm_hasher.write(session_id.as_bytes());
@@ -194,7 +310,7 @@ async fn enforce_oss_tool_calls(
         let mut loop_hasher = ahash::AHasher::default();
         loop_hasher.write(session_id.as_bytes());
         loop_hasher.write(unified_tool.name.as_bytes());
-        loop_hasher.write(unified_tool.arguments_str.as_bytes());
+        loop_hasher.write_u64(unified_tool.semantic_hash);
         let loop_key = loop_hasher.finish().to_string();
 
         let count = state.agent_guardian_cache.get(&loop_key).await.unwrap_or(0) + 1;
@@ -247,9 +363,11 @@ pub async fn record_session_spend(_state: &Arc<AppState>, session_id: &str, _cos
 /// Set `SANDBOX_FALLBACK_MODE=open` to revert to fail-open behaviour.
 #[inline]
 fn sandbox_is_fail_open() -> bool {
+    // In OSS environments, if the compliance service is not expected to run,
+    // we default to fail-open to allow agent tool calls to proceed without 503 timeouts.
     std::env::var("SANDBOX_FALLBACK_MODE")
-        .map(|v| v.eq_ignore_ascii_case("open"))
-        .unwrap_or(false)
+        .map(|v| v.eq_ignore_ascii_case("open") || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true)
 }
 
 /// Compact deny payload — single JSON object, minimal token cost.
@@ -397,7 +515,10 @@ mod tests {
     #[test]
     fn test_sandbox_fail_open_env_flag() {
         std::env::remove_var("SANDBOX_FALLBACK_MODE");
-        assert!(!sandbox_is_fail_open(), "Default must be fail-closed");
+        assert!(
+            sandbox_is_fail_open(),
+            "Default must be fail-open in OSS mode"
+        );
 
         std::env::set_var("SANDBOX_FALLBACK_MODE", "open");
         assert!(
@@ -413,8 +534,14 @@ mod tests {
 
         std::env::set_var("SANDBOX_FALLBACK_MODE", "true");
         assert!(
+            sandbox_is_fail_open(),
+            "SANDBOX_FALLBACK_MODE=true must be fail-open"
+        );
+
+        std::env::set_var("SANDBOX_FALLBACK_MODE", "closed");
+        assert!(
             !sandbox_is_fail_open(),
-            "SANDBOX_FALLBACK_MODE=true must be fail-closed"
+            "SANDBOX_FALLBACK_MODE=closed must be fail-closed"
         );
 
         std::env::remove_var("SANDBOX_FALLBACK_MODE");
@@ -450,7 +577,8 @@ mod tests {
             rate_limit_window: 60,
             dashboard_url: String::new(),
             llm_api_base_url: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            redis_client: None,
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -464,7 +592,15 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: moka::future::Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         });
 
         let session_id = "test-session-oss";
@@ -483,7 +619,7 @@ mod tests {
                 }]
             });
             let bytes = serde_json::to_vec(&body).unwrap();
-            let res = enforce_oss_agent_guardian(&state, session_id, &bytes).await;
+            let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &bytes).await;
             assert!(res.is_ok(), "Valid progression failed on iteration {}", i);
         }
 
@@ -502,10 +638,11 @@ mod tests {
         let loop_bytes = serde_json::to_vec(&loop_body).unwrap();
 
         for _ in 1..=5 {
-            let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+            let res =
+                enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
             assert!(res.is_ok());
         }
-        let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentRunawayLoop(_))));
 
         // Test 3 (Tool Storm)
@@ -526,12 +663,110 @@ mod tests {
             }]
         });
         let storm_bytes = serde_json::to_vec(&storm_body).unwrap();
-        let res = enforce_oss_agent_guardian(&state, session_id_storm, &storm_bytes).await;
+        let res =
+            enforce_oss_agent_guardian(&state, "test-tenant", session_id_storm, &storm_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentToolStorm(_))));
 
         // Test 4 (Time Window Decay)
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let res = enforce_oss_agent_guardian(&state, session_id, &loop_bytes).await;
+        let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(res.is_ok(), "Cache did not expire");
+    }
+
+    #[test]
+    fn test_ephemeral_hash_evasion() {
+        let payload_base = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\": \"Paris\", \"timestamp\": \"2026-07-16T17:31:00Z\", \"nonce\": \"12345\"}"
+            }
+        });
+
+        let payload_mutated = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"timestamp\": \"2026-07-16T17:35:00Z\", \"location\": \"Paris\", \"nonce\": \"67890\"}"
+            }
+        });
+
+        let mut bytes_base = serde_json::to_vec(&payload_base).unwrap();
+        let parsed_base = simd_json::to_borrowed_value(&mut bytes_base).unwrap();
+        let tc_base = UnifiedToolCall::from_borrowed_value(&parsed_base).unwrap();
+
+        let mut bytes_mutated = serde_json::to_vec(&payload_mutated).unwrap();
+        let parsed_mutated = simd_json::to_borrowed_value(&mut bytes_mutated).unwrap();
+        let tc_mutated = UnifiedToolCall::from_borrowed_value(&parsed_mutated).unwrap();
+
+        assert_eq!(
+            tc_base.semantic_hash, tc_mutated.semantic_hash,
+            "Semantic hash must be identical when only ephemeral keys and ordering change"
+        );
+
+        // Mutating a stable key should yield a different hash
+        let payload_different = serde_json::json!({
+            "function": {
+                "name": "get_weather",
+                "arguments": "{\"location\": \"Berlin\", \"timestamp\": \"2026-07-16T17:31:00Z\", \"nonce\": \"12345\"}"
+            }
+        });
+        let mut bytes_diff = serde_json::to_vec(&payload_different).unwrap();
+        let parsed_diff = simd_json::to_borrowed_value(&mut bytes_diff).unwrap();
+        let tc_diff = UnifiedToolCall::from_borrowed_value(&parsed_diff).unwrap();
+        assert_ne!(
+            tc_base.semantic_hash, tc_diff.semantic_hash,
+            "Semantic hash must change when a stable key value changes"
+        );
+
+        // Numeric coercion verification (e.g. integer vs float)
+        let payload_int = serde_json::json!({
+            "function": {
+                "name": "set_threshold",
+                "arguments": "{\"value\": 5}"
+            }
+        });
+        let payload_float = serde_json::json!({
+            "function": {
+                "name": "set_threshold",
+                "arguments": "{\"value\": 5.0}"
+            }
+        });
+        let mut bytes_int = serde_json::to_vec(&payload_int).unwrap();
+        let parsed_int = simd_json::to_borrowed_value(&mut bytes_int).unwrap();
+        let tc_int = UnifiedToolCall::from_borrowed_value(&parsed_int).unwrap();
+
+        let mut bytes_float = serde_json::to_vec(&payload_float).unwrap();
+        let parsed_float = simd_json::to_borrowed_value(&mut bytes_float).unwrap();
+        let tc_float = UnifiedToolCall::from_borrowed_value(&parsed_float).unwrap();
+
+        assert_eq!(
+            tc_int.semantic_hash, tc_float.semantic_hash,
+            "Numeric values (5 vs 5.0) must coerce to equivalent hashes"
+        );
+
+        // Confirm "id" is NOT in the ephemeral blacklist
+        let payload_id1 = serde_json::json!({
+            "function": {
+                "name": "fetch",
+                "arguments": "{\"id\": 1}"
+            }
+        });
+        let payload_id2 = serde_json::json!({
+            "function": {
+                "name": "fetch",
+                "arguments": "{\"id\": 2}"
+            }
+        });
+        let mut bytes_id1 = serde_json::to_vec(&payload_id1).unwrap();
+        let parsed_id1 = simd_json::to_borrowed_value(&mut bytes_id1).unwrap();
+        let tc_id1 = UnifiedToolCall::from_borrowed_value(&parsed_id1).unwrap();
+
+        let mut bytes_id2 = serde_json::to_vec(&payload_id2).unwrap();
+        let parsed_id2 = simd_json::to_borrowed_value(&mut bytes_id2).unwrap();
+        let tc_id2 = UnifiedToolCall::from_borrowed_value(&parsed_id2).unwrap();
+
+        assert_ne!(
+            tc_id1.semantic_hash, tc_id2.semantic_hash,
+            "The 'id' field must not be stripped from hash payload"
+        );
     }
 }

@@ -1,4 +1,4 @@
-name: Rust CI
+name: Kryneth AI Gateway CI
 
 on:
   push:
@@ -11,8 +11,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_and_test:
-    name: Rust Check & Test (OSS Mode)
+  unit_tests:
+    name: Rust Check & Unit Tests
     runs-on: ubuntu-latest
 
     steps:
@@ -35,8 +35,217 @@ jobs:
     - name: Cargo Check
       run: cargo check
 
-    - name: Cargo Test
+    - name: Cargo Test (132 Unit Tests)
       run: cargo test
 
     - name: Cargo Clippy
       run: cargo clippy -- -D warnings
+
+  e2e_and_trace_suite:
+    name: E2E 50+ Scenarios & White-Box Trace Suite
+    runs-on: ubuntu-latest
+    needs: unit_tests
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install Python Mock Server Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install fastapi uvicorn anyio pydantic requests
+
+    - name: Set up Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Set up Rust Toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Install Protoc
+      uses: arduino/setup-protoc@v3
+      with:
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Pre-build Kryneth Gateway Binary
+      run: |
+        cargo build --bin kryneth_gateway
+
+    - name: Start Python Upstream Mock Server (Port 9090)
+      run: |
+        nohup python mock_server/main.py > mock_server.log 2>&1 &
+        echo "Waiting for Python Mock Server on port 9090..."
+        for i in {1..30}; do
+          if curl -s http://localhost:9090/health > /dev/null 2>&1 || curl -s http://localhost:9090/v1/chat/completions > /dev/null 2>&1; then
+            echo "✅ Python Mock Server is listening on port 9090!"
+            break
+          fi
+          sleep 1
+        done
+
+    - name: Generate Mock routing.yaml for E2E Tests
+      run: |
+        cat <<EOF > routing.yaml
+        "00000000-0000-0000-0000-000000000000":
+          "gpt-4o":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_API_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "agentic-test-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_AGENTIC_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "gpt-4o-mini":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "MOCK_API_KEY"
+                api_key: "mock-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o-mini"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "rate-limit-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "RATE_LIMIT_KEY"
+                api_key: "mock-key-rate-limit"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "claude-3-5-sonnet":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "ANTHROPIC_API_KEY"
+                api_key: "mock-anthropic-key"
+                provider_name: "anthropic"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "claude-3-5-sonnet-20241022"
+                schema_format: "anthropic"
+            rate_limit_rpm: 1000
+
+          "gemini-1.5-pro":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "GEMINI_API_KEY"
+                api_key: "mock-gemini-key"
+                provider_name: "gemini"
+                base_url: "http://127.0.0.1:9090/v1beta/models"
+                target_model: "gemini-1.5-pro"
+                schema_format: "gemini"
+            rate_limit_rpm: 1000
+
+          "deepseek-r1":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "DEEPSEEK_API_KEY"
+                api_key: "mock-deepseek-key"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "deepseek-r1"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "cohere-command-r":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "COHERE_API_KEY"
+                api_key: "mock-cohere-key"
+                provider_name: "cohere"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "command-r-plus"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+
+          "failover-model":
+            targets:
+              - priority: 1
+                weight: 100
+                api_key_alias: "PRIMARY_FAIL_KEY"
+                api_key: "mock-key-fail"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1/fail-primary"
+                target_model: "gpt-4o"
+                schema_format: "openai"
+              - priority: 2
+                weight: 100
+                api_key_alias: "SECONDARY_SUCCESS_KEY"
+                api_key: "mock-key-success"
+                provider_name: "openai"
+                base_url: "http://127.0.0.1:9090/v1"
+                target_model: "gpt-4o-mini"
+                schema_format: "openai"
+            rate_limit_rpm: 1000
+        EOF
+
+    - name: Start Kryneth AI Gateway (Port 8080)
+      env:
+        KRYNETH_VALID_KEYS: "ke_live_test_key,ke_test_key,re_live_test_key"
+        ROUTING_CONFIG_PATH: "routing.yaml"
+        JWT_SECRET: "dummy_ci_secret_key_32_bytes_long_1234567890"
+        APP_ENV: "development"
+      run: |
+        nohup ./target/debug/kryneth_gateway > gateway.log 2>&1 &
+        echo "Waiting for Kryneth AI Gateway health on port 8080..."
+        for i in {1..60}; do
+          if curl -s http://localhost:8080/health > /dev/null 2>&1; then
+            echo "✅ Kryneth AI Gateway is ready on http://localhost:8080!"
+            break
+          fi
+          sleep 1
+        done
+
+    - name: Run 50+ Scenario Integration Suite
+      run: |
+        cd e2e_clients
+        npm install
+        node runner.js
+
+    - name: Run White-Box Trace Audit Suite
+      run: |
+        cd e2e_runner
+        npm install
+        npm test
+
+    - name: Dump Logs on Failure
+      if: failure()
+      run: |
+        echo "=== KRYNETH GATEWAY LOGS ==="
+        cat gateway.log || true
+        echo "=== PYTHON MOCK SERVER LOGS ==="
+        cat mock_server.log || true

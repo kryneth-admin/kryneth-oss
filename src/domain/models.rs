@@ -7,6 +7,14 @@ use crate::domain::ports::{
 };
 use std::sync::Arc;
 
+/// Semantic MCP Idempotency operation execution state.
+#[derive(Clone, Debug)]
+pub enum OpState {
+    InProgress { lease_until: std::time::Instant },
+    Completed { content: String, latency_ms: u64 },
+    Unknown,
+}
+
 /// Application-wide shared state passed to every handler via Axum's `State` extractor.
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +24,7 @@ pub struct AppState {
     pub rate_limit_window: u32,
     pub dashboard_url: String,
     pub llm_api_base_url: Option<String>,
+    pub redis_client: Option<redis::Client>,
     // ── Dependency-inverted ports (OSS ↔ Enterprise swappable) ────────────────
     pub telemetry: Arc<dyn TelemetryPort>,
     pub billing: Arc<dyn BillingPort>,
@@ -49,8 +58,21 @@ pub struct AppState {
     pub tool_registry: std::sync::Arc<crate::usecases::tool_router::ToolRegistry>,
     /// OSS Agent Guardian cache for Tool Storms and Runaway Loops.
     pub agent_guardian_cache: moka::future::Cache<String, u32>,
+    /// Semantic MCP Idempotency & Safe-Retry operation cache.
+    pub operation_cache: moka::future::Cache<String, OpState>,
     /// Ephemeral Admin Dashboard in-memory metrics.
     pub dashboard_metrics: std::sync::Arc<DashboardMetrics>,
+    /// Dynamic pricing map for dynamic token & tool pricing rules
+    pub pricing_map: std::sync::Arc<
+        arc_swap::ArcSwap<
+            std::collections::HashMap<String, crate::domain::billing::PrecautionaryRate>,
+        >,
+    >,
+    /// In-memory trace audit store for white-box E2E testing (GET /v1/admin/traces/:trace_id).
+    pub trace_store: std::sync::Arc<dashmap::DashMap<String, serde_json::Value>>,
+    /// Dynamic budgets mapped by scope identifier
+    pub budget_map:
+        std::sync::Arc<arc_swap::ArcSwap<std::collections::HashMap<String, ScopedBudget>>>,
 }
 
 #[derive(Debug)]
@@ -59,6 +81,8 @@ pub struct DashboardMetrics {
     pub total_latency_ms: std::sync::atomic::AtomicUsize,
     pub total_tokens: std::sync::atomic::AtomicUsize,
     pub blocked_agent_loops: std::sync::atomic::AtomicUsize,
+    pub mcp_already_in_flight_blocked: std::sync::atomic::AtomicUsize,
+    pub mcp_previous_attempt_unknown_blocked: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for DashboardMetrics {
@@ -68,6 +92,8 @@ impl Default for DashboardMetrics {
             total_latency_ms: std::sync::atomic::AtomicUsize::new(0),
             total_tokens: std::sync::atomic::AtomicUsize::new(0),
             blocked_agent_loops: std::sync::atomic::AtomicUsize::new(0),
+            mcp_already_in_flight_blocked: std::sync::atomic::AtomicUsize::new(0),
+            mcp_previous_attempt_unknown_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -149,6 +175,10 @@ pub struct ClientConfig {
     pub preferred_model: Option<String>,
     pub fallback_timeout_ms: i32,
     pub semantic_cache_threshold: f64,
+    pub max_agent_loops: i32,
+    pub max_identical_tool_calls: i32,
+    pub context_window_budget: i32,
+    pub burn_rate_limit: f64,
 }
 
 #[derive(Default)]
@@ -228,6 +258,28 @@ pub struct KrynethConversation {
 
 pub type StandardResponse = serde_json::Value;
 pub type StandardStreamChunk = String;
+
+/// Scopes under which budgets can be configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BudgetScopeType {
+    Global,
+    Tenant,
+    Team,
+    ApiKey,
+    Route,
+}
+
+/// Dynamic hierarchical scoped budget definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedBudget {
+    pub scope_type: BudgetScopeType,
+    pub scope_id: String,
+    pub limit_amount: f64,
+    pub alert_80_enabled: bool,
+    pub alert_100_projected_enabled: bool,
+    pub emergency_kill_switch: bool,
+}
 
 // ==============================================================================
 // Virtual API Key Phase 1: Multi-LLM Architecture Models

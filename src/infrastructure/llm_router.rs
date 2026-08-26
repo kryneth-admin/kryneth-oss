@@ -1,15 +1,11 @@
 //! infrastructure/llm_router.rs — Dynamic Multi-LLM Router with Automated Fallback
 
-use serde_json::Value;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use crate::domain::models::{AppState, UpstreamTarget};
 use crate::error::GatewayError;
 use crate::infrastructure::routing_strategy::RoutingStrategy;
-use crate::infrastructure::translators::{
-    AnthropicTranslator, BaseTranslator, GeminiTranslator, OpenAiTranslator,
-};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthScheme {
@@ -23,6 +19,7 @@ pub enum SchemaFormat {
     OpenAI,
     Anthropic,
     Gemini,
+    Cohere,
 }
 
 #[derive(Debug, Clone)]
@@ -31,14 +28,6 @@ pub struct ProviderConfig {
     pub base_url: String, // Kept for backwards compatibility but we use model_config.base_url
     pub auth_scheme: AuthScheme,
     pub schema_format: SchemaFormat,
-}
-
-pub fn get_translator(schema: &SchemaFormat) -> Box<dyn BaseTranslator> {
-    match schema {
-        SchemaFormat::OpenAI => Box::new(OpenAiTranslator),
-        SchemaFormat::Anthropic => Box::new(AnthropicTranslator),
-        SchemaFormat::Gemini => Box::new(GeminiTranslator),
-    }
 }
 
 pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
@@ -50,6 +39,7 @@ pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
     let (schema, auth) = match provider.as_str() {
         "anthropic" => (SchemaFormat::Anthropic, AuthScheme::XApiKey),
         "gemini" | "google" => (SchemaFormat::Gemini, AuthScheme::GoogleApiKey),
+        "cohere" => (SchemaFormat::Cohere, AuthScheme::Bearer),
         _ => (SchemaFormat::OpenAI, AuthScheme::Bearer),
     };
 
@@ -61,8 +51,14 @@ pub fn get_provider_config(provider_name: &str) -> ProviderConfig {
     }
 }
 
+pub fn request_has_tools(body_bytes: &[u8]) -> bool {
+    let scan_limit = body_bytes.len().min(16384);
+    let slice = &body_bytes[..scan_limit];
+    slice.windows(7).any(|w| w == b"\"tools\"") || slice.windows(12).any(|w| w == b"\"tool_calls\"")
+}
+
 fn is_retryable_error(status: u16) -> bool {
-    matches!(status, 401 | 403 | 429 | 500 | 502 | 503 | 504)
+    matches!(status, 401 | 403 | 404 | 408 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Circuit-breaker entries are scoped per tenant so aliases never collide across tenants.
@@ -105,18 +101,19 @@ pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
                 }
             }
             if i < after_key.len() {
-                let model_str = std::str::from_utf8(&after_key[start..i])
-                    .map_err(|_| GatewayError::InvalidJSON("Invalid UTF-8 in model name".to_string()))?;
+                let model_str = std::str::from_utf8(&after_key[start..i]).map_err(|_| {
+                    GatewayError::InvalidJSON("Invalid UTF-8 in model name".to_string())
+                })?;
                 return Ok(model_str.trim().to_string());
             }
         }
     }
-    
+
     if body_bytes.len() > 5 * 1024 * 1024 {
         // High load pass-through: if > 5MB and model key not found in prefix, return error
         return Err(GatewayError::MissingModel);
     }
-    
+
     // Fallback for smaller cases
     #[derive(serde::Deserialize)]
     struct ExtractModel<'a> {
@@ -137,9 +134,10 @@ pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
 pub async fn prep_upstream_request(
     state: &Arc<AppState>,
     tenant_id: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
     _strategy: RoutingStrategy,
+    test_scenario: Option<&str>,
 ) -> Result<PreparedUpstreamRequest, GatewayError> {
     // 1. Extract the model from the incoming request using the fast-path scanner
     let model_owned = extract_model_fast(body_bytes)?;
@@ -151,15 +149,39 @@ pub async fn prep_upstream_request(
     // 3. Lookup the model for the specific tenant
     tracing::debug!("LOOKUP: Tenant: '{}', Model: '{}'", tenant_id, model);
 
-    let tenant_models = routing_guard.get(tenant_id).ok_or_else(|| {
-        GatewayError::ModelNotConfigured(format!("No routing config for tenant '{}'", tenant_id))
-    })?;
-    let model_config = tenant_models.get(model).ok_or_else(|| {
-        GatewayError::ModelNotConfigured(format!(
-            "Model '{}' not configured for tenant '{}'",
-            model, tenant_id
-        ))
-    })?;
+    let tenant_models = routing_guard
+        .get(tenant_id)
+        .or_else(|| routing_guard.get("00000000-0000-0000-0000-000000000000"))
+        .ok_or_else(|| {
+            GatewayError::ModelNotConfigured(format!("No routing config for tenant '{}'", tenant_id))
+        })?;
+
+    let model_config = tenant_models
+        .get(model)
+        .or_else(|| {
+            let m = model.trim().to_lowercase();
+            if m.starts_with("gpt-") {
+                tenant_models.get("gpt-4o")
+            } else if m.starts_with("claude-") {
+                tenant_models.get("claude-3-5-sonnet")
+            } else if m.starts_with("gemini-") {
+                tenant_models.get("gemini-1.5-pro")
+            } else if m.starts_with("deepseek-") {
+                tenant_models.get("deepseek-r1")
+            } else if m.starts_with("cohere-") || m.starts_with("command-") {
+                tenant_models.get("cohere-command-r")
+            } else if m.starts_with("llama-") {
+                tenant_models.get("llama-3.3-70b-versatile")
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            GatewayError::ModelNotConfigured(format!(
+                "Model '{}' not configured for tenant '{}'",
+                model, tenant_id
+            ))
+        })?;
 
     if model_config.targets.is_empty() {
         warn!("No targets configured for model {}", model);
@@ -214,6 +236,7 @@ pub async fn prep_upstream_request(
         &primary_target.target_model,
         body_bytes,
         accept_header,
+        test_scenario,
     )?;
 
     Ok(PreparedUpstreamRequest {
@@ -230,10 +253,13 @@ pub async fn prep_upstream_request(
     })
 }
 
+/// Dynamic Routing Helper with Circuit-Breaker Fallbacks.
+/// Executes the pre-built primary request, and if it fails with a retryable HTTP status code,
+/// iterates through fallback targets in priority order, building and attempting each one.
 pub async fn execute_upstream_request(
     state: &Arc<AppState>,
     mut prep: PreparedUpstreamRequest,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
 ) -> Result<(reqwest::Response, String, u8, PreparedUpstreamRequest), GatewayError> {
     info!(
         model = %prep.model,
@@ -262,11 +288,15 @@ pub async fn execute_upstream_request(
                 model = %prep.model,
                 key_alias = %prep.primary_target.api_key_alias,
                 status = status,
-                "Primary provider key failed with retryable error, tripping circuit breaker and falling back"
+                "Primary target returned retryable status code — triggering circuit breaker"
             );
-            // Trip the breaker for the primary key too!
+            // Open circuit breaker for 30s
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state.circuit_breaker.insert(cb_key, ()).await;
+            state
+                .circuit_breaker
+                .insert(cb_key, ())
+                .await;
+
             last_error = GatewayError::ResponseBuild(format!("Provider returned {}", status));
         }
         Err(e) => {
@@ -274,91 +304,142 @@ pub async fn execute_upstream_request(
                 model = %prep.model,
                 key_alias = %prep.primary_target.api_key_alias,
                 error = %e,
-                "Primary provider key unreachable, tripping circuit breaker and falling back"
+                "Primary target network request failed — triggering circuit breaker"
             );
-            // Trip the breaker for the primary key too!
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state.circuit_breaker.insert(cb_key, ()).await;
+            state
+                .circuit_breaker
+                .insert(cb_key, ())
+                .await;
+
             last_error = GatewayError::UpstreamUnreachable(e);
         }
     }
 
-    // Fallback loop: circuit-breaker is tripped on each retryable failure.
-    while let Some(target) = prep.fallback_targets.first().cloned() {
+    // Try fallbacks in priority order
+    for (i, fallback) in prep.fallback_targets.clone().into_iter().enumerate() {
+        let cb_key = circuit_breaker_key(&prep.tenant_id, &fallback.api_key_alias);
+        if state.circuit_breaker.get(&cb_key).await.is_some() {
+            warn!(
+                model = %prep.model,
+                key_alias = %fallback.api_key_alias,
+                "Fallback target circuit breaker OPEN — skipping"
+            );
+            continue;
+        }
+
         info!(
             model = %prep.model,
-            key_alias = %target.api_key_alias,
-            priority = target.priority,
-            "Attempting fallback upstream request"
+            key_alias = %fallback.api_key_alias,
+            fallback_index = i + 1,
+            "Attempting fallback target request"
         );
 
-        let provider_id = target.schema_format.as_str();
-        let config = get_provider_config(provider_id);
+        let fallback_config = get_provider_config(fallback.schema_format.as_str());
 
         let fallback_req = build_provider_request(
             &state.http_client,
-            &config,
-            &target.base_url,
-            &target.api_key,
+            &fallback_config,
+            &fallback.base_url,
+            &fallback.api_key,
             &prep.model,
-            &target.target_model,
+            &fallback.target_model,
             body_bytes,
-            &prep.accept_header,
-        )?;
+            "application/json",
+            None,
+        );
 
-        match fallback_req.send().await {
+        let req_builder = match fallback_req {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    model = %prep.model,
+                    key_alias = %fallback.api_key_alias,
+                    error = %e,
+                    "Failed to build fallback request — skipping"
+                );
+                continue;
+            }
+        };
+
+        match req_builder.send().await {
             Ok(response) => {
                 let status = response.status().as_u16();
                 if !is_retryable_error(status) {
-                    // Fallback key succeeded — is_hot_swapped = 1
-                    prep.fallback_targets.remove(0); // consume the one we just succeeded with so it's not reused
-                    return Ok((response, target.api_key_alias.clone(), 1u8, prep));
+                    info!(
+                        model = %prep.model,
+                        key_alias = %fallback.api_key_alias,
+                        "Fallback target succeeded — hot-swap complete"
+                    );
+                    prep.executed_provider = fallback_config.id.clone();
+                    prep.is_hot_swapped = 1;
+                    return Ok((response, fallback.api_key_alias.clone(), 1u8, prep));
                 }
                 warn!(
                     model = %prep.model,
-                    key_alias = %target.api_key_alias,
+                    key_alias = %fallback.api_key_alias,
                     status = status,
-                    "Provider key failed with retryable error, tripping circuit breaker and falling back"
+                    "Fallback target returned retryable status code — triggering circuit breaker"
                 );
-                // Trip the breaker — this key is blacklisted for 60 seconds.
-                let cb_key = circuit_breaker_key(&prep.tenant_id, &target.api_key_alias);
-                state.circuit_breaker.insert(cb_key, ()).await;
-                last_error = GatewayError::ResponseBuild(format!("Provider returned {}", status));
+                state
+                    .circuit_breaker
+                    .insert(cb_key, ())
+                    .await;
+
+                last_error = GatewayError::ResponseBuild(format!(
+                    "Fallback target {} HTTP {}",
+                    fallback.api_key_alias, status
+                ));
             }
             Err(e) => {
                 warn!(
                     model = %prep.model,
-                    key_alias = %target.api_key_alias,
+                    key_alias = %fallback.api_key_alias,
                     error = %e,
-                    "Provider key unreachable, tripping circuit breaker and falling back"
+                    "Fallback target network request failed — triggering circuit breaker"
                 );
-                // Trip the breaker for network-level failures too.
-                let cb_key = circuit_breaker_key(&prep.tenant_id, &target.api_key_alias);
-                state.circuit_breaker.insert(cb_key, ()).await;
+                state
+                    .circuit_breaker
+                    .insert(cb_key, ())
+                    .await;
+
                 last_error = GatewayError::UpstreamUnreachable(e);
             }
         }
-        prep.fallback_targets.remove(0); // Remove failed target
     }
 
-    error!("All configured keys for {} exhausted", prep.model);
+    error!(
+        model = %prep.model,
+        "All upstream targets failed (primary + all fallbacks)"
+    );
     Err(last_error)
+}
+
+pub async fn execute_upstream_request_simple(
+    state: &Arc<AppState>,
+    tenant_id: &str,
+    body_bytes: &mut [u8],
+    accept_header: &str,
+    strategy: RoutingStrategy,
+) -> Result<(reqwest::Response, String, u8), GatewayError> {
+    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
+    let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
+    Ok((resp, key, hot_swapped))
 }
 
 pub async fn route_chat_completion_with_fallback(
     state: &Arc<AppState>,
     tenant_id: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let prep =
-        prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy).await?;
+    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, unused_variables)]
 pub fn build_provider_request(
     client: &reqwest::Client,
     config: &ProviderConfig,
@@ -366,8 +447,9 @@ pub fn build_provider_request(
     api_key: &str,
     model: &str,
     upstream_target_model: &str,
-    body_bytes: &axum::body::Bytes,
+    body_bytes: &mut [u8],
     accept_header: &str,
+    test_scenario: Option<&str>,
 ) -> Result<reqwest::RequestBuilder, GatewayError> {
     let endpoint = if config.schema_format == SchemaFormat::Anthropic {
         format!("{}/messages", base_url)
@@ -384,19 +466,26 @@ pub fn build_provider_request(
         if is_stream {
             format!(
                 "{}/{}:streamGenerateContent?key={}",
-                base_url, model, api_key
+                base_url, upstream_target_model, api_key
             )
         } else {
-            format!("{}/{}:generateContent?key={}", base_url, model, api_key)
+            format!(
+                "{}/{}:generateContent?key={}",
+                base_url, upstream_target_model, api_key
+            )
         }
     } else {
         format!("{}/chat/completions", base_url)
     };
 
-    let builder = client
+    let mut builder = client
         .post(&endpoint)
         .header("Content-Type", "application/json")
         .header("Accept", accept_header);
+
+    if let Some(scen) = test_scenario {
+        builder = builder.header("X-Test-Scenario", scen);
+    }
 
     let request = match config.auth_scheme {
         AuthScheme::Bearer => builder.bearer_auth(api_key),
@@ -416,25 +505,22 @@ pub fn build_provider_request(
     // If request payload > 5MB, bypass payload rewriting or translation entirely,
     // and build the request directly using body_bytes.clone().
     let request = if body_bytes.len() > 5 * 1024 * 1024 {
-        request.body(body_bytes.clone())
+        request.body(body_bytes.to_vec())
     } else if config.schema_format != SchemaFormat::OpenAI {
-        use crate::infrastructure::translators::BaseTranslator;
-        let source_translator = crate::infrastructure::translators::OpenAiTranslator;
+        let source_adapter =
+            crate::infrastructure::providers::get_utp_adapter(&SchemaFormat::OpenAI);
 
-        let parsed_value: Value = serde_json::from_slice(body_bytes).map_err(|e| {
-            GatewayError::ResponseBuild(format!("Invalid JSON for translation: {}", e))
-        })?;
-
-        let mut conv = source_translator.to_universal(parsed_value).map_err(|e| {
-            GatewayError::ResponseBuild(format!("Incoming translation failed: {}", e))
+        let mut conv = source_adapter.to_universal(body_bytes).map_err(|e| {
+            GatewayError::ResponseBuild(format!("Incoming translation failed: {e}"))
         })?;
 
         conv.model = Some(upstream_target_model.to_string());
 
-        let translator = get_translator(&config.schema_format);
-        let final_body = translator
+        let target_adapter =
+            crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
+        let final_body = target_adapter
             .from_universal(&conv)
-            .map_err(|e| GatewayError::ResponseBuild(format!("Translation error: {}", e)))?;
+            .map_err(|e| GatewayError::ResponseBuild(format!("Translation error: {e}")))?;
 
         request.json(&final_body)
     } else {
@@ -552,9 +638,9 @@ mod tests {
     fn test_rewrite_model_field_produces_valid_json() {
         let input =
             r#"{"model": "my-prod-route", "messages": [{"role": "user", "content": "Hello"}]}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let result = rewrite_model_field(&mut bytes, "llama3-8b-8192");
+        let result = rewrite_model_field(&bytes, "llama3-8b-8192");
         assert!(
             result.is_ok(),
             "rewrite_model_field must not return an error: {:?}",
@@ -595,9 +681,9 @@ mod tests {
         // This is the regression test for the original serde_json::to_vec bug which
         // could corrupt numbers, booleans, and null values through simd-json's OwnedValue.
         let input = r#"{"model": "my-route", "temperature": 0.7, "max_tokens": 1024, "stream": true, "top_p": null}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "llama3-70b-8192").unwrap();
+        let output = rewrite_model_field(&bytes, "llama3-70b-8192").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(parsed["model"].as_str().unwrap(), "llama3-70b-8192");
@@ -627,9 +713,9 @@ mod tests {
         // The critical case: target model is LONGER than the virtual name.
         // A naive byte-splice approach would produce invalid JSON here.
         let input = r#"{"model": "gpt-4", "messages": []}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "llama3-70b-8192-tool-use-preview").unwrap();
+        let output = rewrite_model_field(&bytes, "llama3-70b-8192-tool-use-preview").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(
@@ -643,9 +729,9 @@ mod tests {
     fn test_rewrite_model_field_long_to_short_model_name() {
         // The reverse: target model is SHORTER than the virtual name.
         let input = r#"{"model": "my-very-long-virtual-route-name", "messages": []}"#;
-        let mut bytes = input.as_bytes().to_vec();
+        let bytes = input.as_bytes().to_vec();
 
-        let output = rewrite_model_field(&mut bytes, "gpt-4o").unwrap();
+        let output = rewrite_model_field(&bytes, "gpt-4o").unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(
@@ -657,8 +743,8 @@ mod tests {
 
     #[test]
     fn test_rewrite_model_field_invalid_json_returns_error() {
-        let mut bytes = b"not valid json {{{".to_vec();
-        let result = rewrite_model_field(&mut bytes, "some-model");
+        let bytes = b"not valid json {{{".to_vec();
+        let result = rewrite_model_field(&bytes, "some-model");
         assert!(
             result.is_err(),
             "rewrite_model_field must propagate simd-json parse errors"
@@ -688,7 +774,8 @@ mod tests {
             rate_limit_window: 0,
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            redis_client: None,
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -702,7 +789,15 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         };
 
         (Arc::new(state), mock_server)
@@ -761,12 +856,14 @@ mod tests {
             .to_string(),
         );
 
+        let mut body_mut = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
+            None,
         )
         .await;
 
@@ -839,12 +936,14 @@ mod tests {
             r#"{"model": "  clean-route  ", "messages": [{"role": "user", "content": "hi"}]}"#,
         );
 
+        let mut body_mut = body.to_vec();
         let result = prep_upstream_request(
             &state,
             tenant_id,
-            &body,
+            &mut body_mut,
             "*/*",
             RoutingStrategy::Default,
+            None,
         )
         .await;
 
@@ -904,15 +1003,11 @@ mod tests {
 
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
-        let prep = prep_upstream_request(
-            &state,
-            "t1",
-            &body,
-            "*/*",
-            RoutingStrategy::Default,
-        )
-        .await
-        .unwrap();
+        let mut body_mut = body.to_vec();
+        let prep =
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
+                .await
+                .unwrap();
 
         // 4. Verify: key-2 should have been selected as primary (prep.fallback_targets should be empty)
         assert_eq!(
@@ -959,16 +1054,12 @@ mod tests {
 
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
-        let prep = prep_upstream_request(
-            &state,
-            "t1",
-            &body,
-            "*/*",
-            RoutingStrategy::Default,
-        )
-        .await
-        .unwrap();
-        let _ = execute_upstream_request(&state, prep, &body).await;
+        let mut body_mut = body.to_vec();
+        let prep =
+            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
+                .await
+                .unwrap();
+        let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
 
         // 4. Verify: Breaker is now open for "fail-key" under tenant t1
         let is_blacklisted = state
@@ -992,7 +1083,7 @@ mod tests {
         assert!(is_retryable_error(500), "500 should be retryable");
         assert!(!is_retryable_error(200), "200 should not be retryable");
         assert!(!is_retryable_error(400), "400 should not be retryable");
-        assert!(!is_retryable_error(404), "404 should not be retryable");
+        assert!(is_retryable_error(404), "404 should be retryable");
     }
 
     #[test]
@@ -1006,7 +1097,10 @@ mod tests {
         };
 
         // Case 1: Stream
-        let stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let stream_body = axum::body::Bytes::from(
+            r#"{"model": "gemini-1.5-pro", "stream": true, "messages": [{"role": "user", "content": "hello"}]}"#,
+        );
+        let mut stream_body_mut = stream_body.to_vec();
         let builder_stream = build_provider_request(
             &client,
             &config,
@@ -1014,8 +1108,9 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &stream_body,
+            &mut stream_body_mut,
             "*/*",
+            None,
         )
         .unwrap();
         let request_stream = builder_stream.build().unwrap();
@@ -1025,7 +1120,10 @@ mod tests {
         );
 
         // Case 2: Non-stream
-        let non_stream_body = axum::body::Bytes::from(r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#);
+        let non_stream_body = axum::body::Bytes::from(
+            r#"{"model": "gemini-1.5-pro", "stream": false, "messages": [{"role": "user", "content": "hello"}]}"#,
+        );
+        let mut non_stream_body_mut = non_stream_body.to_vec();
         let builder_non_stream = build_provider_request(
             &client,
             &config,
@@ -1033,8 +1131,9 @@ mod tests {
             "test-gemini-key",
             "gemini-1.5-pro",
             "gemini-1.5-pro",
-            &non_stream_body,
+            &mut non_stream_body_mut,
             "*/*",
+            None,
         )
         .unwrap();
         let request_non_stream = builder_non_stream.build().unwrap();
@@ -1042,5 +1141,210 @@ mod tests {
             request_non_stream.url().as_str(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=test-gemini-key"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_upstream_request_falls_back_on_404() {
+        let (state, primary_server) = setup_test_state().await;
+        let fallback_server = MockServer::start().await;
+
+        // Primary returns 404 Not Found
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&primary_server)
+            .await;
+
+        // Fallback returns 200 OK
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-fallback",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Fallback response"}}]
+            })))
+            .mount(&fallback_server)
+            .await;
+
+        let tenant_id = "test-tenant-404";
+        let mut tenant_map = HashMap::new();
+        tenant_map.insert(
+            "gemini-1.5-flash".to_string(),
+            ModelConfig {
+                targets: vec![
+                    UpstreamTarget {
+                        priority: 1,
+                        weight: 100,
+                        api_key_alias: "primary_key".into(),
+                        api_key: "primary_secret".to_string(),
+                        provider_name: "gemini".into(),
+                        base_url: primary_server.uri(),
+                        target_model: "gemini-1.5-flash".to_string(),
+                        schema_format: "gemini".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 2,
+                        weight: 100,
+                        api_key_alias: "GROQ_API_KEY".into(),
+                        api_key: "groq_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: fallback_server.uri(),
+                        target_model: "gemini-1.5-flash".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "gemini-1.5-flash",
+                "messages": [{"role": "user", "content": "hello"}]
+            })
+            .to_string(),
+        );
+
+        let mut body_mut = body.to_vec();
+        let prep = prep_upstream_request(
+            &state,
+            tenant_id,
+            &mut body_mut,
+            "application/json",
+            RoutingStrategy::Default,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (resp, success_key, hot_swapped, updated_prep) =
+            execute_upstream_request(&state, prep, &mut body_mut)
+                .await
+                .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(success_key, "GROQ_API_KEY");
+        assert_eq!(hot_swapped, 1);
+        assert_eq!(updated_prep.executed_provider, "openai");
+    }
+
+    #[test]
+    fn test_request_has_tools_detection() {
+        let payload_with_tools =
+            r#"{"model": "gpt-4o", "messages": [], "tools": [{"type": "function"}]}"#;
+        assert!(request_has_tools(payload_with_tools.as_bytes()));
+
+        let payload_with_tool_calls =
+            r#"{"model": "gpt-4o", "messages": [{"role": "assistant", "tool_calls": []}]}"#;
+        assert!(request_has_tools(payload_with_tool_calls.as_bytes()));
+
+        let payload_plain =
+            r#"{"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]}"#;
+        assert!(!request_has_tools(payload_plain.as_bytes()));
+    }
+
+    #[tokio::test]
+    async fn test_execute_upstream_request_skips_cohere_fallback_on_tools() {
+        let (state, primary_server) = setup_test_state().await;
+        let cohere_server = MockServer::start().await;
+        let final_server = MockServer::start().await;
+
+        // Primary returns 500 Server Error (retryable)
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&primary_server)
+            .await;
+
+        // Cohere returns 422 Unprocessable Entity if called (should be skipped!)
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(422).set_body_string("Cohere 422 invalid schema"))
+            .mount(&cohere_server)
+            .await;
+
+        // Final OpenAI target returns 200 OK
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-ok",
+                "object": "chat.completion",
+                "choices": [{"message": {"role": "assistant", "content": "Success"}}]
+            })))
+            .mount(&final_server)
+            .await;
+
+        let tenant_id = "test-tenant-cohere-skip";
+        let mut tenant_map = HashMap::new();
+        tenant_map.insert(
+            "agentic-model".to_string(),
+            ModelConfig {
+                targets: vec![
+                    UpstreamTarget {
+                        priority: 1,
+                        weight: 100,
+                        api_key_alias: "primary_key".into(),
+                        api_key: "primary_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: primary_server.uri(),
+                        target_model: "gpt-4o".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 2,
+                        weight: 100,
+                        api_key_alias: "COHERE_API_KEY".into(),
+                        api_key: "cohere_secret".to_string(),
+                        provider_name: "cohere".into(),
+                        base_url: cohere_server.uri(),
+                        target_model: "command-r-plus".to_string(),
+                        schema_format: "cohere".into(),
+                    },
+                    UpstreamTarget {
+                        priority: 3,
+                        weight: 100,
+                        api_key_alias: "BACKUP_OPENAI_KEY".into(),
+                        api_key: "backup_secret".to_string(),
+                        provider_name: "openai".into(),
+                        base_url: final_server.uri(),
+                        target_model: "gpt-4o-mini".to_string(),
+                        schema_format: "openai".into(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let mut map = HashMap::new();
+        map.insert(tenant_id.to_string(), tenant_map);
+        state.routing_state.state.store(Arc::new(map));
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "agentic-model",
+                "messages": [{"role": "user", "content": "use a tool"}],
+                "tools": [{"type": "function", "function": {"name": "test"}}]
+            })
+            .to_string(),
+        );
+
+        let mut body_mut = body.to_vec();
+        let prep = prep_upstream_request(
+            &state,
+            tenant_id,
+            &mut body_mut,
+            "application/json",
+            RoutingStrategy::Default,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (resp, success_key, hot_swapped, updated_prep) =
+            execute_upstream_request(&state, prep, &mut body_mut)
+                .await
+                .unwrap();
+
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(success_key, "BACKUP_OPENAI_KEY");
+        assert_eq!(hot_swapped, 1);
+        assert_eq!(updated_prep.executed_provider, "openai");
     }
 }

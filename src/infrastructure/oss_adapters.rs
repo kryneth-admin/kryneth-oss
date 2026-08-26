@@ -15,11 +15,22 @@ use crate::error::GatewayError;
 
 // ── OssTelemetry ─────────────────────────────────────────────────────────────
 
-pub struct OssTelemetry;
+pub struct OssTelemetry {
+    pub trace_store: Arc<dashmap::DashMap<String, serde_json::Value>>,
+}
+
+impl OssTelemetry {
+    pub fn new(trace_store: Arc<dashmap::DashMap<String, serde_json::Value>>) -> Self {
+        Self { trace_store }
+    }
+}
 
 impl TelemetryPort for OssTelemetry {
     fn log_event(&self, event: serde_json::Value) {
         tracing::info!(telemetry_event = ?event, "OSS Telemetry Log Event");
+        if let Some(trace_id) = event.get("trace_id").or_else(|| event.get("id")).and_then(|v| v.as_str()) {
+            self.trace_store.insert(trace_id.to_string(), event);
+        }
     }
 }
 
@@ -38,14 +49,31 @@ impl BillingPort for OssBilling {
         })
     }
 
+    fn enforce_scoped_budget<'a>(
+        &'a self,
+        _tenant_id: &'a str,
+        _team_id: Option<&'a str>,
+        _key_alias: Option<&'a str>,
+        _model: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async {
+            // OSS mode does not enforce budgets
+            Ok(())
+        })
+    }
+
     fn process_billing_telemetry<'a>(
         &'a self,
         _trace_id: &'a str,
         _tenant_id: &'a str,
+        _team_id: Option<&'a str>,
+        _api_key_alias: Option<&'a str>,
         _provider: &'a str,
         _target_model: &'a str,
         _prompt_tokens: u64,
         _completion_tokens: u64,
+        _mcp_calls: u32,
+        _agent_loops: u32,
         _cache_hit: bool,
         _is_free_tier: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
@@ -128,7 +156,11 @@ impl RateLimitPort for OssRateLimit {
 pub struct OssRoutingConfig;
 
 impl RoutingConfigPort for OssRoutingConfig {
-    fn start_subscriber(&self, _routing_state: Arc<crate::domain::models::RoutingState>) {
+    fn start_subscriber(
+        &self,
+        _routing_state: Arc<crate::domain::models::RoutingState>,
+        _mcp_registry: Arc<crate::infrastructure::mcp_registry::McpConnectionRegistry>,
+    ) {
         // OSS is static and loaded from file at boot time
     }
 }
@@ -138,6 +170,10 @@ impl RoutingConfigPort for OssRoutingConfig {
 pub struct OssSemanticCache;
 
 impl SemanticCachePort for OssSemanticCache {
+    fn is_enabled(&self) -> bool {
+        false
+    }
+
     fn lookup<'a>(
         &'a self,
         _tenant_id: &'a str,

@@ -1,21 +1,129 @@
-# Default Kryneth OSS Routing Configuration
-"00000000-0000-0000-0000-000000000000":
-  "llama-3.3-70b-versatile":
+# ==============================================================================
+# Kryneth Gateway - Routing Configuration
+#
+# SETUP INSTRUCTIONS:
+# 1. Copy this file to routing.yaml:  cp routing.yaml.example routing.yaml
+# 2. Replace tenant IDs and API keys with your values
+# 3. Configure your LLM providers and failover chains
+# 4. Start Kryneth: docker-compose up -d (or: cargo run --release)
+#
+# SYNTAX:
+# - Each top-level key is a Tenant ID (UUID format or custom string)
+# - Under each tenant: Virtual Model Names (what your app requests)
+# - For each model: Targets (provider failover chain, by priority)
+# ==============================================================================
+
+# PRODUCTION TENANT
+# ════════════════════════════════════════════════════════════════════════════
+# Replace "prod-tenant-uuid" with your actual production tenant ID
+"prod-tenant-uuid":
+  
+  # Virtual model: "gpt-4-turbo"
+  # When your app requests this model, Kryneth routes to the targets below
+  "gpt-4-turbo":
+    rate_limit_rpm: 60  # Optional: Request rate limit
+    targets:
+      # Primary: OpenAI
+      - priority: 1
+        weight: 100
+        provider_name: "openai"
+        api_key_alias: "OPENAI_API_KEY"  # Maps to env var
+        base_url: "https://api.openai.com/v1"
+        target_model: "gpt-4-turbo"
+        schema_format: "openai"
+      
+      # Fallback: Anthropic (if OpenAI is down or rate-limited)
+      - priority: 2
+        weight: 100
+        provider_name: "anthropic"
+        api_key_alias: "ANTHROPIC_API_KEY"
+        base_url: "https://api.anthropic.com"
+        target_model: "claude-3-opus-20240229"
+        schema_format: "anthropic"
+
+  "claude-3-opus":
     targets:
       - priority: 1
         weight: 100
+        provider_name: "anthropic"
+        api_key_alias: "ANTHROPIC_API_KEY"
+        base_url: "https://api.anthropic.com"
+        target_model: "claude-3-opus-20240229"
+        schema_format: "anthropic"
+
+# DEVELOPMENT/TESTING TENANT
+# ════════════════════════════════════════════════════════════════════════════
+# Replace "00000000-0000-0000-0000-000000000000" with your actual tenant ID
+"00000000-0000-0000-0000-000000000000":
+  
+  # Virtual model: "llama-3.3-70b-versatile"
+  # Fast, free model from Groq (great for testing)
+  "llama-3.3-70b-versatile":
+    rate_limit_rpm: 60
+    targets:
+      # Primary: Groq (fastest free LLM)
+      - priority: 1
+        weight: 100
         api_key_alias: "GROQ_API_KEY"
-        api_key: ""
         provider_name: "groq"
         base_url: "https://api.groq.com/openai/v1"
         target_model: "llama-3.3-70b-versatile"
         schema_format: "openai"
+      
+      # Fallback: Cohere
       - priority: 2
         weight: 100
         api_key_alias: "COHERE_API_KEY"
-        api_key: ""
         provider_name: "cohere"
-        base_url: "https://api.cohere.ai/compatibility/v1"
+        base_url: "https://api.cohere.com/v1"
         target_model: "command-r-plus-08-2024"
         schema_format: "openai"
-    rate_limit_rpm: 60
+
+# STAGING TENANT (Optional)
+# ════════════════════════════════════════════════════════════════════════════
+"staging-tenant-uuid":
+  
+  "gpt-4-turbo":
+    targets:
+      # Use cheaper model for staging testing
+      - priority: 1
+        weight: 100
+        provider_name: "groq"
+        api_key_alias: "GROQ_API_KEY"
+        base_url: "https://api.groq.com/openai/v1"
+        target_model: "llama-3.3-70b-versatile"
+        schema_format: "openai"
+
+# ==============================================================================
+# CONFIGURATION REFERENCE
+# ==============================================================================
+#
+# TARGET CONFIGURATION OPTIONS:
+#   priority:       Integer (1, 2, 3...) - Lower number = tried first
+#   weight:         Integer (1-100) - Load balancing weight (if same priority)
+#   provider_name:  "openai" | "anthropic" | "groq" | "cohere" | "gemini"
+#   api_key_alias:  Environment variable name containing the API key
+#   base_url:       Provider API endpoint URL
+#   target_model:   Actual model name at the provider
+#   schema_format:  "openai" | "anthropic" | "gemini" (message format)
+#
+# COMMON PROVIDERS:
+#   OpenAI:     https://api.openai.com/v1
+#   Anthropic:  https://api.anthropic.com
+#   Groq:       https://api.groq.com/openai/v1
+#   Cohere:     https://api.cohere.com/v1
+#   Gemini:     https://generativelanguage.googleapis.com/v1beta/openai/
+#
+# FAILOVER BEHAVIOR:
+#   - Kryneth tries Priority 1 first
+#   - If Priority 1 returns 429 (rate limit) or 5xx, try Priority 2
+#   - If all targets fail, return error to client
+#
+# GETTING API KEYS:
+#   Groq (Free):      https://console.groq.com/
+#   Cohere:           https://dashboard.cohere.com/
+#   OpenAI:           https://platform.openai.com/api-keys
+#   Anthropic:        https://console.anthropic.com/
+#   Google Gemini:    https://makersuite.google.com/app/apikey
+#
+# ==============================================================================

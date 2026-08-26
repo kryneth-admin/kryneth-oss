@@ -17,6 +17,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // ── LLM proxy: rate limit + auth ─────────────────────────────────────────
     let proxy_routes = Router::new()
         .route("/chat/completions", post(handlers::chat_completions))
+        .route("/responses", post(handlers::chat_completions))
+        .route("/completions", post(handlers::chat_completions))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::api::middleware::rate_limit::rate_limit_middleware,
@@ -37,6 +39,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/dashboard", get(handlers::get_dashboard))
         .route("/metrics/live", get(handlers::get_live_metrics))
         .route("/routing-state", get(handlers::get_routing_state))
+        .route("/traces/:trace_id", get(handlers::get_admin_trace))
+        .route("/billing/top-up", post(handlers::top_up_wallet))
         // RBAC: Admin role required for ALL /v1/admin/* routes.
         // Applied before auth so Claims is already in extensions when it runs.
         .route_layer(axum::middleware::from_fn(require_admin))
@@ -105,6 +109,7 @@ fn create_cors_layer() -> CorsLayer {
             axum::http::HeaderName::from_static("x-kryneth-routing-strategy"),
             axum::http::HeaderName::from_static("x-kryneth-loop-count"),
             axum::http::HeaderName::from_static("x-kryneth-context-compression"),
+            axum::http::HeaderName::from_static("x-test-scenario"),
         ])
         .expose_headers([
             axum::http::HeaderName::from_static("x-cache"),

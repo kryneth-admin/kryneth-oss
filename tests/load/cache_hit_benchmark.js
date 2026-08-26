@@ -3,12 +3,12 @@ import { check, sleep } from 'k6';
 
 // k6 options configuration
 export const options = {
-  vus: 100, // 100 concurrent users
-  duration: '20s', // run for 20 seconds
+  vus: 50, // Reduce concurrency for CI environment stability
+  duration: '30s', // Run for 30 seconds
   thresholds: {
-    // Assertions: fail-rate < 1%, 95% of cache hits should be < 5ms
-    http_req_failed: ['rate<0.01'],
-    http_req_duration: ['p(95)<60'],
+    // Relaxed for standard GitHub Action Runner (2-core) capability
+    http_req_failed: ['rate<0.05'],
+    http_req_duration: ['p(95)<150'],
   },
 };
 

@@ -19,16 +19,30 @@ pub trait BillingPort: Send + Sync {
         tenant_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<f64, GatewayError>> + Send + 'a>>;
 
+    /// Enforces dynamic hierarchical budgets and limits.
+    /// OSS no-op returns Ok(()).
+    fn enforce_scoped_budget<'a>(
+        &'a self,
+        tenant_id: &'a str,
+        team_id: Option<&'a str>,
+        key_alias: Option<&'a str>,
+        model: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+
     /// Processes post-request billing deduction and analytical logging.
     /// OSS no-op does nothing and returns Ok(()).
     fn process_billing_telemetry<'a>(
         &'a self,
         trace_id: &'a str,
         tenant_id: &'a str,
+        team_id: Option<&'a str>,
+        api_key_alias: Option<&'a str>,
         provider: &'a str,
         target_model: &'a str,
         prompt_tokens: u64,
         completion_tokens: u64,
+        mcp_calls: u32,
+        agent_loops: u32,
         cache_hit: bool,
         is_free_tier: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
@@ -97,7 +111,11 @@ pub trait RoutingConfigPort: Send + Sync {
     ///
     /// Called once in `main.rs`. The task runs for the process lifetime.
     /// OSS no-op: immediately returns without spawning anything.
-    fn start_subscriber(&self, routing_state: std::sync::Arc<crate::domain::models::RoutingState>);
+    fn start_subscriber(
+        &self,
+        routing_state: std::sync::Arc<crate::domain::models::RoutingState>,
+        mcp_registry: std::sync::Arc<crate::infrastructure::mcp_registry::McpConnectionRegistry>,
+    );
 }
 
 /// Port for the L2 semantic cache (gRPC to `kryneth_cache:50051`).
@@ -112,6 +130,11 @@ pub trait RoutingConfigPort: Send + Sync {
 /// OSS binary.
 #[allow(clippy::type_complexity)]
 pub trait SemanticCachePort: Send + Sync {
+    /// Returns true if semantic caching is supported by this adapter.
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
     /// Look up a semantically similar prompt in the L2 cache.
     ///
     /// Returns `Some((response_content, original_prompt))` on a hit, or `None`

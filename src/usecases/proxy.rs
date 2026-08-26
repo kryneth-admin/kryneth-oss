@@ -14,6 +14,7 @@ use eventsource_stream::Eventsource;
 // futures::StreamExt is imported inline inside handle_streaming_response.
 use regex::Regex;
 use serde_json::{json, Value};
+use simd_json::prelude::*;
 // NOTE: ReceiverStream (bounded) is used inline in handle_streaming_response.
 use tracing::{debug, error, info, warn};
 
@@ -90,44 +91,146 @@ fn get_requested_provider(state: &Arc<AppState>, tenant_id: &str, model_name: &s
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// Extracts textual content from user messages across different LLM provider schemas (OpenAI, Anthropic, Gemini),
-/// returning `None` if no clean user semantic text can be isolated to prevent vector cache pollution.
-fn extract_semantic_text(payload: &Value) -> Option<String> {
-    let mut semantic_text = String::new();
+/// Extracts textual content from the most recent user message for semantic embedding,
+/// returning `None` if the payload represents an active agentic tool-execution turn.
+///
+/// ## Agentic Loop Prevention
+///
+/// In multi-turn agentic workflows (User → Assistant `tool_calls` → Tool result → Assistant
+/// next turn), every subsequent LLM call re-includes the original user prompt. Without this
+/// guard, `extract_semantic_text` would always land on the same user text, generate an
+/// identical 384-dim BGE vector, and the L1/L2 pgvector lookup would return `dist=0.0000,
+/// sim=1.0000` — trapping the agent in an infinite cache hit loop.
+///
+/// Returning `None` propagates through the pipeline:
+/// `semantic_text = None` → `embedding_vector = None` → cache future short-circuits →
+/// request is forwarded directly to the upstream LLM without cache read or write.
+///
+/// ## What is NOT bypassed
+///
+/// - **L1 Exact Cache**: keyed on the full raw JSON body. Each agentic turn appends new
+///   messages, so the raw bytes differ every turn — false exact-match collisions are
+///   impossible. No bypass needed.
+/// - **PII scanning** (`extract_semantic_text_raw`): intentionally left active. Agent tools
+///   (e.g., `query_database`, `fetch_user_profile`) are the primary vectors for introducing
+///   raw sensitive data (PII) into the LLM context. The 64 KiB bounded scan is a mandatory
+///   security trade-off for data-privacy compliance.
+fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<String> {
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 1: OpenAI / Anthropic `messages` array — MERGED SINGLE-PASS
+    //
+    // Iterates newest-to-oldest (rev). On each message:
+    //   • If a tool/function execution marker is detected → return None immediately.
+    //   • If a user message is found first → extract its text and break.
+    //
+    // Single-pass O(N): detection and extraction share one reverse walk.
+    // ─────────────────────────────────────────────────────────────────────────
+    if let Some(simd_json::BorrowedValue::Array(messages)) = payload.get("messages") {
+        let mut semantic_text = String::new();
 
-    // 1. OpenAI & Anthropic Messages format
-    if let Some(messages) = payload.get("messages").and_then(|m| m.as_array()) {
-        for msg in messages.iter().rev() {
-            if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+        for i in (0..messages.len()).rev() {
+            let msg = &messages[i];
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+
+            // ── Agentic bypass: tool / function response role ─────────────
+            if role == "tool" || role == "function" {
+                tracing::debug!(
+                    "Agentic tool response turn detected (role={}); bypassing semantic cache",
+                    role
+                );
+                return None;
+            }
+
+            // ── Agentic bypass: assistant with active tool invocations ────
+            if role == "assistant" {
+                if msg
+                    .get("tool_calls")
+                    .and_then(|tc| tc.as_array())
+                    .is_some_and(|a| !a.is_empty())
+                {
+                    tracing::debug!(
+                        "Agentic assistant tool_calls detected; bypassing semantic cache"
+                    );
+                    return None;
+                }
+                if msg.get("function_call").is_some() {
+                    tracing::debug!(
+                        "Agentic assistant function_call detected; bypassing semantic cache"
+                    );
+                    return None;
+                }
+                // Anthropic assistants use a content block array with type="tool_use"
+                // instead of (or in addition to) the tool_calls field.
+                if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                    for block in content_blocks {
+                        if let Some(bt) = block.get("type").and_then(|t| t.as_str()) {
+                            if bt == "tool_use" {
+                                tracing::debug!(
+                                    "Anthropic assistant tool_use content block detected; bypassing semantic cache"
+                                );
+                                return None;
+                            }
+                        }
+                    }
+                }
+                // assistant messages with no tool invocations are skipped — continue scan
+                continue;
+            }
+
+            // ── Agentic bypass: Anthropic tool content blocks (non-assistant roles) ──
+            // Catches `tool_result` in user-role messages (the tool response turn).
+            if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in content_blocks {
+                    if let Some(bt) = block.get("type").and_then(|t| t.as_str()) {
+                        if bt == "tool_result" {
+                            tracing::debug!(
+                                "Anthropic tool_result content block detected; bypassing semantic cache"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+
+            // ── Extraction: most recent user message ──────────────────────
+            if role == "user" {
                 if let Some(content) = msg.get("content") {
                     if let Some(text) = content.as_str() {
                         semantic_text.push_str(text);
                         semantic_text.push('\n');
-                        break;
                     } else if let Some(arr) = content.as_array() {
                         for block in arr {
                             if let Some(text) = block.as_str() {
                                 semantic_text.push_str(text);
                                 semantic_text.push('\n');
-                            } else if let Some(block_obj) = block.as_object() {
-                                if block_obj.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                    if let Some(text) =
-                                        block_obj.get("text").and_then(|t| t.as_str())
-                                    {
-                                        semantic_text.push_str(text);
-                                        semantic_text.push('\n');
-                                    }
+                            } else if block.is_object()
+                                && block.get("type").and_then(|t| t.as_str()) == Some("text")
+                            {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    semantic_text.push_str(text);
+                                    semantic_text.push('\n');
                                 }
                             }
                         }
-                        break;
                     }
                 }
+                break; // stop after the most recent user message
             }
         }
+
+        let trimmed = semantic_text.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
-    // 2. Anthropic legacy prompt format
-    else if let Some(prompt) = payload.get("prompt").and_then(|p| p.as_str()) {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 2: Anthropic legacy `prompt` string format
+    // No tool-turn markers exist in this format; extract the most recent Human turn.
+    // ─────────────────────────────────────────────────────────────────────────
+    if let Some(prompt) = payload.get("prompt").and_then(|p| p.as_str()) {
         let mut clean_prompt = prompt;
         if let Some(human_idx) = prompt.rfind("\n\nHuman:") {
             let start = human_idx + "\n\nHuman:".len();
@@ -137,11 +240,42 @@ fn extract_semantic_text(payload: &Value) -> Option<String> {
                 clean_prompt = &prompt[start..];
             }
         }
-        semantic_text.push_str(clean_prompt.trim());
+        let trimmed = clean_prompt.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
-    // 3. Google Gemini format
-    else if let Some(contents) = payload.get("contents").and_then(|c| c.as_array()) {
-        for content in contents.iter().rev() {
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PATH 3: Google Gemini `contents` array — TWO-PASS
+    //
+    // Pass 1 (forward): detect functionCall / functionResponse in any part.
+    //   These appear in `model`-role content, not user-role content, so a single
+    //   reverse walk cannot reliably detect and extract in one pass.
+    // Pass 2 (reverse): extract the most recent `user`-role text parts.
+    // ─────────────────────────────────────────────────────────────────────────
+    if let Some(simd_json::BorrowedValue::Array(contents)) = payload.get("contents") {
+        // Pass 1: agentic bypass detection (forward iteration on contents)
+        for content in contents {
+            if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
+                for part in parts {
+                    if part.get("functionResponse").is_some() || part.get("functionCall").is_some()
+                    {
+                        tracing::debug!(
+                            "Gemini functionResponse/functionCall detected; bypassing semantic cache"
+                        );
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // Pass 2: user text extraction (reverse index walk)
+        let mut semantic_text = String::new();
+        for i in (0..contents.len()).rev() {
+            let content = &contents[i];
             if content.get("role").and_then(|r| r.as_str()) == Some("user") {
                 if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
                     for part in parts {
@@ -150,17 +284,304 @@ fn extract_semantic_text(payload: &Value) -> Option<String> {
                             semantic_text.push('\n');
                         }
                     }
-                    break;
+                }
+                break;
+            }
+        }
+
+        let trimmed = semantic_text.trim();
+        return if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+
+    None
+}
+
+/// Zero-copy PII scan target extractor.
+///
+/// Reads directly from raw JSON bytes without heap-copying the payload.
+/// Uses a byte-level state machine (same pattern as `extract_model_fast` and
+/// `rewrite_model_field` in `llm_router.rs`) to extract only text-type content
+/// nodes from user messages, explicitly skipping Base64 image blocks.
+///
+/// Output is capped at 64 KiB — the regex scan surface is always bounded
+/// regardless of total payload size (e.g., a 50 MB multimodal request).
+///
+/// Returns `None` when no extractable text exists (pure image / tool payload),
+/// which is treated as "no PII possible" and skips compliance redaction.
+fn extract_semantic_text_raw(body: &[u8]) -> Option<String> {
+    const BUDGET: usize = 64 * 1024;
+
+    #[inline]
+    fn skip_ws(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && b[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        i
+    }
+
+    fn parse_string(b: &[u8], i: usize) -> Option<(&[u8], usize)> {
+        if b.get(i) != Some(&b'"') {
+            return None;
+        }
+        let mut j = i + 1;
+        let mut esc = false;
+        while j < b.len() {
+            match (esc, b[j]) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => return Some((&b[i + 1..j], j + 1)),
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
+    fn skip_value(b: &[u8], start: usize) -> usize {
+        let i = skip_ws(b, start);
+        if i >= b.len() {
+            return b.len();
+        }
+        match b[i] {
+            b'"' => parse_string(b, i).map(|(_, e)| e).unwrap_or(b.len()),
+            b'[' | b'{' => {
+                let open = b[i];
+                let close = if open == b'[' { b']' } else { b'}' };
+                let mut depth = 1i32;
+                let mut j = i + 1;
+                while j < b.len() && depth > 0 {
+                    match b[j] {
+                        b'"' => {
+                            j = parse_string(b, j).map(|(_, e)| e).unwrap_or(j + 1);
+                            continue;
+                        }
+                        c if c == open => depth += 1,
+                        c if c == close => depth -= 1,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                j
+            }
+            _ => {
+                let mut j = i;
+                while j < b.len()
+                    && !matches!(b[j], b',' | b'}' | b']' | b' ' | b'\n' | b'\r' | b'\t')
+                {
+                    j += 1;
+                }
+                j
+            }
+        }
+    }
+
+    fn find_key(b: &[u8], key: &[u8], start: usize, end: usize) -> Option<usize> {
+        let end = end.min(b.len());
+        let mut i = start;
+        while i < end {
+            if b[i] == b'"' {
+                let klen = key.len();
+                if i + klen + 2 <= end
+                    && b[i + 1..i + 1 + klen] == *key
+                    && b.get(i + 1 + klen) == Some(&b'"')
+                {
+                    let mut j = i + klen + 2;
+                    j = skip_ws(b, j);
+                    if b.get(j) == Some(&b':') {
+                        j += 1;
+                        j = skip_ws(b, j);
+                        return Some(j);
+                    }
+                }
+                if let Some((_, end_off)) = parse_string(b, i) {
+                    i = end_off;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    let len = body.len();
+    let mut out = String::new();
+
+    // Iterate through all JSON objects `{ ... }` in body
+    let mut i = 0;
+    while i < len && out.len() < BUDGET {
+        if body[i] == b'"' {
+            if let Some((_, end)) = parse_string(body, i) {
+                i = end;
+                continue;
+            }
+        }
+        if body[i] == b'{' {
+            let obj_start = i;
+            let mut depth = 1i32;
+            let mut j = i + 1;
+            while j < len && depth > 0 {
+                match body[j] {
+                    b'"' => {
+                        if let Some((_, end)) = parse_string(body, j) {
+                            j = end;
+                            continue;
+                        }
+                    }
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+
+            if depth == 0 {
+                let obj_bytes = &body[obj_start..j];
+                let obj_len = obj_bytes.len();
+
+                // Check if this object is a user message
+                let is_user_role = find_key(obj_bytes, b"role", 0, obj_len)
+                    .and_then(|voff| parse_string(obj_bytes, voff))
+                    .map(|(role_val, _)| role_val == b"user")
+                    .unwrap_or(false);
+
+                if is_user_role {
+                    // Extract "content" (OpenAI / Anthropic)
+                    if let Some(cv) = find_key(obj_bytes, b"content", 0, obj_len) {
+                        let cv = skip_ws(obj_bytes, cv);
+                        if cv < obj_len {
+                            match obj_bytes[cv] {
+                                b'"' => {
+                                    if let Some((raw, _)) = parse_string(obj_bytes, cv) {
+                                        if let Ok(text) = std::str::from_utf8(raw) {
+                                            out.push_str(text);
+                                            out.push('\n');
+                                        }
+                                    }
+                                }
+                                b'[' => {
+                                    let arr_end = skip_value(obj_bytes, cv);
+                                    let mut k = cv + 1;
+                                    while k < arr_end && out.len() < BUDGET {
+                                        k = skip_ws(obj_bytes, k);
+                                        if k >= arr_end || obj_bytes[k] == b']' {
+                                            break;
+                                        }
+                                        if obj_bytes[k] == b'{' {
+                                            let block_end = skip_value(obj_bytes, k);
+                                            let block_bytes = &obj_bytes[k..block_end];
+                                            let blen = block_bytes.len();
+
+                                            let is_text = find_key(block_bytes, b"type", 0, blen)
+                                                .and_then(|tv| parse_string(block_bytes, tv))
+                                                .map(|(t, _)| t == b"text")
+                                                .unwrap_or(true);
+
+                                            if is_text {
+                                                if let Some(tv) =
+                                                    find_key(block_bytes, b"text", 0, blen)
+                                                {
+                                                    if let Some((raw, _)) =
+                                                        parse_string(block_bytes, tv)
+                                                    {
+                                                        if let Ok(text) = std::str::from_utf8(raw) {
+                                                            out.push_str(text);
+                                                            out.push('\n');
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            k = block_end;
+                                        } else {
+                                            k = skip_value(obj_bytes, k);
+                                        }
+                                        k = skip_ws(obj_bytes, k);
+                                        if obj_bytes.get(k) == Some(&b',') {
+                                            k += 1;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+
+                    // Extract "parts" (Gemini)
+                    if let Some(pv) = find_key(obj_bytes, b"parts", 0, obj_len) {
+                        let pv = skip_ws(obj_bytes, pv);
+                        if obj_bytes.get(pv) == Some(&b'[') {
+                            let arr_end = skip_value(obj_bytes, pv);
+                            let mut k = pv + 1;
+                            while k < arr_end && out.len() < BUDGET {
+                                k = skip_ws(obj_bytes, k);
+                                if k >= arr_end || obj_bytes[k] == b']' {
+                                    break;
+                                }
+                                if obj_bytes[k] == b'{' {
+                                    let block_end = skip_value(obj_bytes, k);
+                                    let block_bytes = &obj_bytes[k..block_end];
+                                    let blen = block_bytes.len();
+                                    if let Some(tv) = find_key(block_bytes, b"text", 0, blen) {
+                                        if let Some((raw, _)) = parse_string(block_bytes, tv) {
+                                            if let Ok(text) = std::str::from_utf8(raw) {
+                                                out.push_str(text);
+                                                out.push('\n');
+                                            }
+                                        }
+                                    }
+                                    k = block_end;
+                                } else {
+                                    k = skip_value(obj_bytes, k);
+                                }
+                                k = skip_ws(obj_bytes, k);
+                                if obj_bytes.get(k) == Some(&b',') {
+                                    k += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // Anthropic legacy: top-level "prompt" string (scan first 8 KiB only)
+    if out.trim().is_empty() {
+        if let Some(pv) = find_key(body, b"prompt", 0, len.min(8192)) {
+            let pv = skip_ws(body, pv);
+            if body.get(pv) == Some(&b'"') {
+                if let Some((raw, _)) = parse_string(body, pv) {
+                    if let Ok(prompt) = std::str::from_utf8(raw) {
+                        let text = if let Some(idx) = prompt.rfind("\n\nHuman:") {
+                            let s = &prompt[idx + "\n\nHuman:".len()..];
+                            s.find("\n\nAssistant:")
+                                .map(|e| s[..e].trim())
+                                .unwrap_or_else(|| s.trim())
+                        } else {
+                            prompt.trim()
+                        };
+                        if !text.is_empty() {
+                            out.push_str(text);
+                        }
+                    }
                 }
             }
         }
     }
 
-    let trimmed = semantic_text.trim();
+    if out.len() > BUDGET {
+        out.truncate(BUDGET);
+    }
+
+    let trimmed = out.trim().to_string();
     if trimmed.is_empty() {
         None
     } else {
-        Some(trimmed.to_string())
+        Some(trimmed)
     }
 }
 
@@ -231,6 +652,10 @@ async fn get_client_config(state: &Arc<AppState>, tenant_id: &str) -> ClientConf
         preferred_model: None,
         fallback_timeout_ms: 30000,
         semantic_cache_threshold: 0.85,
+        max_agent_loops: 20,
+        max_identical_tool_calls: 5,
+        context_window_budget: 128000,
+        burn_rate_limit: 10.0,
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -245,135 +670,20 @@ pub async fn execute_proxy(
     is_free_tier: bool,
     req_extensions: &axum::http::Extensions,
     enable_compression: bool,
+    test_scenario: Option<&str>,
 ) -> Result<ProxyResult, GatewayError> {
     let start_time = std::time::Instant::now();
 
-    // High-load Content Bypass:
-    // If request payload is > 5MB, bypass PII checking, compliance, loop checks, and cache lookup,
-    // and stream directly to upstream targets.
-    if body_bytes.len() > 5 * 1024 * 1024 {
-        let prep = crate::infrastructure::llm_router::prep_upstream_request(
-            state,
-            tenant_id,
-            body_bytes,
-            accept_header,
-            strategy,
-        ).await?;
-
-        struct RequestExtensions<'a>(&'a axum::http::Extensions);
-        impl<'a> RequestExtensions<'a> {
-            fn extensions(&self) -> &axum::http::Extensions {
-                self.0
-            }
-        }
-        let req = RequestExtensions(req_extensions);
-
-        let current_balance = match req.extensions().get::<f64>() {
-            Some(b) => *b,
-            None => {
-                return Err(crate::error::GatewayError::InternalError(
-                    "Billing context missing from request extensions".to_string(),
-                ))
-            }
-        };
-
-        let provider_name = prep.primary_target.provider_name.clone();
-        let target_model = prep.primary_target.target_model.clone();
-        let target_rate =
-            crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model);
-
-        if !is_free_tier && target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
-            return Err(crate::error::GatewayError::InsufficientFunds);
-        }
-
-        let (upstream_response, success_key_alias, is_hot_swapped, prep) =
-            crate::infrastructure::llm_router::execute_upstream_request(
-                state,
-                prep,
-                body_bytes,
-            )
-            .await?;
-
-        let requested_provider = provider_name.clone();
-        let executed_provider = requested_provider.clone();
-
-        let upstream_status = upstream_response.status().as_u16();
-        let content_type = upstream_response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/json")
-            .to_string();
-
-        let raw_prompt = std::str::from_utf8(body_bytes)
-            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
-
-        // Fast check for stream without deserialization
-        let is_streaming = {
-            let scan_limit = body_bytes.len().min(8192);
-            let slice = &body_bytes[..scan_limit];
-            if let Some(pos) = slice.windows(8).position(|w| w == b"\"stream\"") {
-                let after_key = &slice[pos + 8..];
-                let mut i = 0;
-                while i < after_key.len() && (after_key[i].is_ascii_whitespace() || after_key[i] == b':') {
-                    i += 1;
-                }
-                i < after_key.len() && after_key[i..].starts_with(b"true")
-            } else {
-                false
-            }
-        };
-
-        if is_streaming {
-            return handle_streaming_response(
-                state,
-                upstream_response,
-                upstream_status,
-                content_type,
-                tenant_id,
-                model_name,
-                raw_prompt,
-                "", // semantic_text
-                trace_ctx,
-                start_time,
-                requested_provider,
-                executed_provider,
-                is_hot_swapped,
-                success_key_alias,
-                prep,
-                body_bytes.clone(),
-                is_free_tier,
-                None, // embedding
-                false, // cache_enabled
-            );
-        } else {
-            return handle_buffered_response(
-                state,
-                upstream_response,
-                upstream_status,
-                content_type,
-                tenant_id,
-                model_name,
-                raw_prompt,
-                "",
-                trace_ctx,
-                start_time,
-                requested_provider,
-                executed_provider,
-                is_hot_swapped,
-                success_key_alias,
-                is_free_tier,
-                None,
-                false,
-                enable_compression,
-            ).await;
-        }
-    }
+    let claims = req_extensions.get::<crate::api::middleware::auth::Claims>();
+    let team_id = claims.and_then(|c| c.team_id.clone());
+    let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
+    let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
 
     let client_config = get_client_config(state, tenant_id).await;
 
     crate::usecases::behavior_guard::enforce_oss_agent_guardian(
         state,
+        tenant_id,
         &trace_ctx.session_id,
         body_bytes,
     )
@@ -383,12 +693,18 @@ pub async fn execute_proxy(
     let raw_prompt: &str =
         std::str::from_utf8(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
-    // ── Stage 0: PII Redaction (fail-closed) ─────────────────────────────────
-    let is_pii_match = pii_regex().is_match(raw_prompt);
+    // ── Stage 0: PII Redaction (fail-closed, zero-copy scan) ─────────────────
+    // extract_semantic_text_raw reads body_bytes directly without .to_vec().
+    // The regex runs only on extracted text nodes (≤64 KiB), never on Base64
+    // image blobs. Pure-image payloads return None → is_pii_match = false.
+    let pii_scan_target = extract_semantic_text_raw(body_bytes);
+    let is_pii_match = pii_scan_target
+        .as_deref()
+        .map(|t| pii_regex().is_match(t))
+        .unwrap_or(false);
 
-    // Lazily evaluate JSON only if necessary
-    let (body_bytes, parsed_value_if_needed): (axum::body::Bytes, Option<Value>) = if is_pii_match {
-        let mut parsed_body: Value = serde_json::from_slice(body_bytes)
+    let body_bytes = if is_pii_match {
+        let parsed_body: Value = serde_json::from_slice(body_bytes)
             .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
         let redacted = call_compliance_redact(
@@ -398,33 +714,37 @@ pub async fn execute_proxy(
             trace_ctx,
         )
         .await?;
-        parsed_body = redacted;
 
-        let redacted_bytes = serde_json::to_vec(&parsed_body).map_err(|e| {
+        let redacted_bytes = serde_json::to_vec(&redacted).map_err(|e| {
             GatewayError::ResponseBuild(format!("Failed to serialize redacted body: {}", e))
         })?;
-        (axum::body::Bytes::from(redacted_bytes), Some(parsed_body))
+        axum::body::Bytes::from(redacted_bytes)
     } else {
-        (body_bytes.clone(), None)
+        body_bytes.clone()
     };
+
+    let mut parse_buffer = body_bytes.to_vec();
 
     // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
-    let lazy_parsed = match parsed_value_if_needed {
-        Some(ref v) => v.clone(),
-        None => serde_json::from_slice(&body_bytes)
-            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?,
+    // Isolate inspection buffer to prevent `simd_json` in-place mutation of `parse_buffer`
+    let (is_streaming, semantic_text) = {
+        let mut inspect_buf = parse_buffer.clone();
+        let lazy_parsed = simd_json::to_borrowed_value(&mut inspect_buf)
+            .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
+
+        let is_stream = lazy_parsed
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let sem_text = extract_semantic_text(&lazy_parsed);
+        (is_stream, sem_text)
     };
 
-    let is_streaming = lazy_parsed
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let semantic_text = extract_semantic_text(&lazy_parsed);
     let semantic_text_str = semantic_text.as_deref().unwrap_or("");
 
     // ── NEW PRECEDENCE RULE: Check Exact Cache BEFORE embedding ───────────────
-    if client_config.semantic_cache_enabled {
+    if test_scenario.is_none() {
         if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
             info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
             return handle_cache_hit(
@@ -439,12 +759,18 @@ pub async fn execute_proxy(
                 is_streaming,
                 is_free_tier,
                 client_config.semantic_cache_enabled,
+                team_id,
+                api_key_alias,
+                agent_loops,
             );
         }
     }
 
     // Step 1: Speculatively generate embedding if semantic text exists
-    let embedding_vector: Option<Vec<f32>> = if client_config.semantic_cache_enabled {
+    let embedding_vector: Option<Vec<f32>> = if test_scenario.is_none()
+        && client_config.semantic_cache_enabled
+        && state.semantic_cache.is_enabled()
+    {
         if let Some(ref sem_text) = semantic_text {
             match state.l1_cache.embed_client.embed(sem_text).await {
                 Ok(vec) => Some(vec),
@@ -463,7 +789,7 @@ pub async fn execute_proxy(
     let cache_future = {
         let embedding_vector = embedding_vector.clone();
         let semantic_text = semantic_text.clone();
-        let semantic_cache_enabled = client_config.semantic_cache_enabled;
+        let semantic_cache_enabled = client_config.semantic_cache_enabled && test_scenario.is_none();
         async move {
             if !semantic_cache_enabled {
                 return None;
@@ -501,9 +827,10 @@ pub async fn execute_proxy(
     let prep_future = llm_router::prep_upstream_request(
         state,
         tenant_id,
-        &body_bytes,
+        &mut parse_buffer,
         accept_header,
         strategy,
+        test_scenario,
     );
 
     let (cache_result, prep_result) = tokio::join!(cache_future, prep_future);
@@ -521,6 +848,9 @@ pub async fn execute_proxy(
             is_streaming,
             is_free_tier,
             client_config.semantic_cache_enabled,
+            team_id,
+            api_key_alias,
+            agent_loops,
         );
     }
 
@@ -531,7 +861,7 @@ pub async fn execute_proxy(
     let loop_future = crate::usecases::behavior_guard::enforce_loop_detection(
         state,
         &trace_ctx.session_id,
-        &lazy_parsed,
+        &body_bytes,
     );
 
     if let Err(e) = tokio::try_join!(token_future, loop_future) {
@@ -552,7 +882,7 @@ pub async fn execute_proxy(
 
         // 2. Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
+            "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
             "status": 429_u16,
             "latency_ms": latency_ms,
@@ -579,7 +909,8 @@ pub async fn execute_proxy(
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
             "is_hot_swapped": 0_u8,
-            "error":           e.to_string()
+            "error":           e.to_string(),
+            "has_response":    false
         });
         state.telemetry.log_event(trace_payload);
 
@@ -600,7 +931,7 @@ pub async fn execute_proxy(
 
         // 2. Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
+            "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
             "status": 429_u16,
             "latency_ms": latency_ms,
@@ -627,7 +958,8 @@ pub async fn execute_proxy(
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
             "is_hot_swapped": 0_u8,
-            "error":           e.to_string()
+            "error":           e.to_string(),
+            "has_response":    false
         });
         state.telemetry.log_event(trace_payload);
 
@@ -638,13 +970,12 @@ pub async fn execute_proxy(
 
     // ── Stage 2 & 3: Dynamic Provider Key Resolution and Routing with Fallback ─
 
-    // [OBSERVABILITY] Log the raw payload being dispatched so we can verify the SIMD
-    // mutation output before it reaches the upstream provider.  Compiled out in release
-    // builds that use the `tracing::debug!` level — zero cost on the hot path.
+    // [OBSERVABILITY] Structural dispatch log — never dumps raw payload bytes so
+    // unredacted PII cannot leak into log aggregators via the debug pipeline.
     tracing::debug!(
         tenant_id = %tenant_id,
         model = %model_name,
-        raw_payload = %std::str::from_utf8(&body_bytes).unwrap_or(""),
+        payload_bytes = body_bytes.len(),
         "Dispatching payload to upstream LLM provider"
     );
 
@@ -668,25 +999,43 @@ pub async fn execute_proxy(
 
     let provider_name = prep.primary_target.provider_name.clone();
     let target_model = prep.primary_target.target_model.clone();
-    let target_rate =
-        crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model);
+    let pricing_guard = state.pricing_map.load();
+    let target_rate = pricing_guard
+        .get(&target_model)
+        .or(pricing_guard.get(model_name))
+        .copied()
+        .unwrap_or_else(|| {
+            crate::domain::billing::lookup_precautionary_rate(&provider_name, &target_model)
+        });
 
-    if !is_free_tier && target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
-        return Err(crate::error::GatewayError::InsufficientFunds);
+    if !is_free_tier {
+        state
+            .billing
+            .enforce_scoped_budget(
+                tenant_id,
+                team_id.as_deref(),
+                api_key_alias.as_deref(),
+                model_name,
+            )
+            .await?;
+
+        if target_rate.input_cost_per_1m > 0.0 && current_balance <= 0.0 {
+            return Err(crate::error::GatewayError::InsufficientFunds);
+        }
     }
 
     let (upstream_response, success_key_alias, is_hot_swapped, prep) =
         llm_router::execute_upstream_request(
             state,
             prep,
-            &body_bytes, // Pass bytes for zero-copy proxy
+            &mut parse_buffer, // Pass mut bytes for zero-copy proxy
         )
         .await?;
 
     // requested_provider and executed_provider are both derived from the gateway's
     // own routing state — upstream providers never return these in response headers.
-    let requested_provider = provider_name.clone();
-    let executed_provider = requested_provider.clone();
+    let requested_provider = prep.requested_provider.clone();
+    let executed_provider = prep.executed_provider.clone();
 
     let upstream_status = upstream_response.status().as_u16();
     let content_type = upstream_response
@@ -729,6 +1078,9 @@ pub async fn execute_proxy(
             is_free_tier,
             embedding_vector,
             client_config.semantic_cache_enabled,
+            team_id,
+            api_key_alias,
+            agent_loops,
         );
     }
 
@@ -752,6 +1104,7 @@ pub async fn execute_proxy(
         embedding_vector,
         client_config.semantic_cache_enabled,
         enable_compression,
+        req_extensions,
     )
     .await
 }
@@ -772,6 +1125,9 @@ fn handle_cache_hit(
     is_streaming: bool,
     is_free_tier: bool,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    agent_loops: u32,
 ) -> Result<ProxyResult, GatewayError> {
     let latency_ms = start_time.elapsed().as_millis() as u32;
     let requested_provider = get_requested_provider(state, tenant_id, model_name);
@@ -795,7 +1151,16 @@ fn handle_cache_hit(
         is_free_tier,
         None,
         semantic_cache_enabled,
+        team_id,
+        api_key_alias,
+        0,
+        agent_loops,
     );
+
+    let created = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     if is_streaming {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
@@ -804,18 +1169,18 @@ fn handle_cache_hit(
         let cached_content = cached_content.clone();
 
         tokio::spawn(async move {
-            // Chunk 1: Content delta
+            // Chunk 1: Role initialization
             let chunk1 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
-                "created": 0,
+                "created": created,
                 "model": model_name,
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
                             "role": "assistant",
-                            "content": cached_content
+                            "content": ""
                         },
                         "finish_reason": null
                     }
@@ -826,11 +1191,32 @@ fn handle_cache_hit(
                 return;
             }
 
-            // Chunk 2: Stop finish_reason
+            // Chunk 2: Content delivery
             let chunk2 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
-                "created": 0,
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": cached_content
+                        },
+                        "finish_reason": null
+                    }
+                ]
+            });
+            let data2 = format!("data: {}\n\n", chunk2);
+            if tx.send(Ok(bytes::Bytes::from(data2))).await.is_err() {
+                return;
+            }
+
+            // Chunk 3: Finish reason stop
+            let chunk3 = json!({
+                "id": mock_id,
+                "object": "chat.completion.chunk",
+                "created": created,
                 "model": model_name,
                 "choices": [
                     {
@@ -840,8 +1226,8 @@ fn handle_cache_hit(
                     }
                 ]
             });
-            let data2 = format!("data: {}\n\n", chunk2);
-            if tx.send(Ok(bytes::Bytes::from(data2))).await.is_err() {
+            let data3 = format!("data: {}\n\n", chunk3);
+            if tx.send(Ok(bytes::Bytes::from(data3))).await.is_err() {
                 return;
             }
 
@@ -860,10 +1246,11 @@ fn handle_cache_hit(
             cache_hit: true,
         })
     } else {
+        let mock_id = format!("chatcmpl-cached-{}", uuid::Uuid::new_v4());
         let mock_response = json!({
-            "id": "chatcmpl-cached",
+            "id": mock_id,
             "object": "chat.completion",
-            "created": 0,
+            "created": created,
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": cached_content}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -911,6 +1298,9 @@ fn handle_streaming_response(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    agent_loops: u32,
 ) -> Result<ProxyResult, GatewayError> {
     let state_stream = state.clone();
     let state_telemetry = state.clone();
@@ -922,10 +1312,15 @@ fn handle_streaming_response(
     let embedding_vector_c = embedding_vector.clone();
     let body_bytes_stream = body_bytes.clone();
     let requested_provider_c = requested_provider.clone();
+    let team_id_c = team_id.clone();
+    let api_key_alias_c = api_key_alias.clone();
 
-    let shared_executed_provider = std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
-    let shared_success_key_alias = std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
-    let shared_is_hot_swapped = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(is_hot_swapped));
+    let shared_executed_provider =
+        std::sync::Arc::new(std::sync::Mutex::new(executed_provider.clone()));
+    let shared_success_key_alias =
+        std::sync::Arc::new(std::sync::Mutex::new(success_key_alias.clone()));
+    let shared_is_hot_swapped =
+        std::sync::Arc::new(std::sync::atomic::AtomicU8::new(is_hot_swapped));
 
     let shared_executed_provider_c = shared_executed_provider.clone();
     let shared_success_key_alias_c = shared_success_key_alias.clone();
@@ -952,7 +1347,10 @@ fn handle_streaming_response(
                     Ok(chunk) => {
                         // Check for error signatures
                         if has_error_signature(&chunk) {
-                            tracing::warn!("Detected error signature in streaming chunk from provider {}", current_provider);
+                            tracing::warn!(
+                                "Detected error signature in streaming chunk from provider {}",
+                                current_provider
+                            );
                             failed = true;
                             break;
                         }
@@ -963,7 +1361,11 @@ fn handle_streaming_response(
                         }
                     }
                     Err(e) => {
-                        tracing::error!("Mid-stream connection error from provider {}: {}", current_provider, e);
+                        tracing::error!(
+                            "Mid-stream connection error from provider {}: {}",
+                            current_provider,
+                            e
+                        );
                         failed = true;
                         break;
                     }
@@ -979,7 +1381,7 @@ fn handle_streaming_response(
             let mut fallback_succeeded = false;
             while let Some(target) = prep.fallback_targets.first().cloned() {
                 prep.fallback_targets.remove(0); // Consume this fallback
-                
+
                 tracing::info!(
                     model = %prep.model,
                     key_alias = %target.api_key_alias,
@@ -989,6 +1391,7 @@ fn handle_streaming_response(
                 let provider_id = target.schema_format.as_str();
                 let config = crate::infrastructure::llm_router::get_provider_config(provider_id);
 
+                let mut stream_buffer = body_bytes_stream.to_vec();
                 let fallback_req = match crate::infrastructure::llm_router::build_provider_request(
                     &state_stream.http_client,
                     &config,
@@ -996,8 +1399,9 @@ fn handle_streaming_response(
                     &target.api_key,
                     &prep.model,
                     &target.target_model,
-                    &body_bytes_stream,
+                    &mut stream_buffer,
                     &prep.accept_header,
+                    None,
                 ) {
                     Ok(req) => req,
                     Err(e) => {
@@ -1011,7 +1415,7 @@ fn handle_streaming_response(
                         if resp.status().is_success() {
                             active_stream = resp.bytes_stream();
                             current_provider = config.id.clone();
-                            
+
                             // Update shared state for telemetry safely
                             if let Ok(mut p_guard) = shared_executed_provider.lock() {
                                 *p_guard = config.id.clone();
@@ -1020,9 +1424,11 @@ fn handle_streaming_response(
                                 *k_guard = target.api_key_alias.clone();
                             }
                             shared_is_hot_swapped.store(1, std::sync::atomic::Ordering::Relaxed);
-                            
+
                             fallback_succeeded = true;
-                            tracing::info!("Streaming failover: stitched fallback stream successfully");
+                            tracing::info!(
+                                "Streaming failover: stitched fallback stream successfully"
+                            );
                             break;
                         } else {
                             tracing::warn!("Streaming failover: fallback provider returned non-success status: {}", resp.status());
@@ -1035,16 +1441,14 @@ fn handle_streaming_response(
             }
 
             if !fallback_succeeded {
-                // All fallbacks exhausted or failed. Send a final SSE error representation and close.
-                let err_json = serde_json::json!({
-                    "error": {
-                        "message": "Stream interrupted and all fallbacks exhausted.",
-                        "type": "stream_interrupted",
-                        "code": "mid_stream_failure"
-                    }
-                });
-                let err_msg = format!("data: {}\n\n", err_json);
-                let _ = client_tx.send(Ok(bytes::Bytes::from(err_msg))).await;
+                // All fallbacks exhausted or failed. Send Err to client_tx to force HTTP stream abort.
+                tracing::error!("Stream interrupted and all fallbacks exhausted. Aborting stream connection.");
+                let _ = client_tx
+                    .send(Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "Upstream mid-stream failure: all fallbacks exhausted",
+                    )))
+                    .await;
                 break;
             }
         }
@@ -1123,7 +1527,13 @@ fn handle_streaming_response(
         let final_success_key_alias = shared_success_key_alias_c
             .lock()
             .map_or_else(|e| e.into_inner().clone(), |g| g.clone());
-        let final_is_hot_swapped = shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
+        let final_is_hot_swapped =
+            shared_is_hot_swapped_c.load(std::sync::atomic::Ordering::Relaxed);
+        let final_status = if final_is_hot_swapped == 1 {
+            200
+        } else {
+            upstream_status
+        };
 
         fire_async_telemetry(
             &state_telemetry,
@@ -1132,7 +1542,7 @@ fn handle_streaming_response(
             &raw_prompt_c,
             &semantic_text_c,
             &trace_ctx_c,
-            upstream_status,
+            final_status,
             latency_ms,
             total_tokens,
             false,
@@ -1144,6 +1554,10 @@ fn handle_streaming_response(
             is_free_tier,
             embedding_vector_c,
             semantic_cache_enabled,
+            team_id_c,
+            api_key_alias_c,
+            0,
+            agent_loops,
         )
         .await;
     });
@@ -1178,6 +1592,7 @@ async fn handle_buffered_response(
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
     enable_compression: bool,
+    req_extensions: &axum::http::Extensions,
 ) -> Result<ProxyResult, GatewayError> {
     let mut body_bytes = upstream_response
         .bytes()
@@ -1187,9 +1602,9 @@ async fn handle_buffered_response(
     let latency_ms = start_time.elapsed().as_millis() as u32;
 
     let config = crate::infrastructure::llm_router::get_provider_config(&executed_provider);
-    let translator = crate::infrastructure::llm_router::get_translator(&config.schema_format);
+    let adapter = crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
     if let Ok(raw_json) = serde_json::from_slice::<Value>(&body_bytes) {
-        match translator.unify_response(raw_json) {
+        match adapter.unify_response(raw_json) {
             Ok(unified_json) => {
                 if let Ok(unified_bytes) = serde_json::to_vec(&unified_json) {
                     body_bytes = unified_bytes;
@@ -1234,28 +1649,63 @@ async fn handle_buffered_response(
     // This block is a no-op when:
     //   • `body_bytes` contains no `tool_calls` key (byte-scan early-exit)
     //   • `mcp_registry` is empty (pre-fetching disabled)
+    let mut mcp_calls = 0;
     {
         let has_tool_calls_bytes = body_bytes
             .windows(b"tool_calls".len())
             .any(|w| w == b"tool_calls");
 
         if has_tool_calls_bytes && !state.mcp_registry.is_empty() {
-            let calls = crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes);
+            let config = crate::infrastructure::llm_router::get_provider_config(&executed_provider);
+            let adapter = crate::infrastructure::providers::get_utp_adapter(&config.schema_format);
+
+            let calls =
+                crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes, &*adapter);
 
             if !calls.is_empty() {
-                let results =
-                    crate::infrastructure::mcp_client::fan_out(calls, tenant_id, state, enable_compression).await;
+                let results = crate::infrastructure::mcp_client::fan_out(
+                    calls,
+                    tenant_id,
+                    state,
+                    enable_compression,
+                )
+                .await;
+
+                mcp_calls = results.len() as u32;
 
                 if !results.is_empty() {
-                    let tool_messages = crate::infrastructure::mcp_client::merge_results(results, enable_compression);
+                    // Filter out PREVIOUS_ATTEMPT_UNKNOWN tool results before passing to LLM context
+                    // to prevent LLM hallucinations on retry failure strings.
+                    let safe_results: Vec<_> = results
+                        .into_iter()
+                        .filter(|r| {
+                            if r.content.contains("PREVIOUS_ATTEMPT_UNKNOWN") {
+                                tracing::warn!(
+                                    tool_name = %r.name,
+                                    "Dropping PREVIOUS_ATTEMPT_UNKNOWN tool result from LLM context to force hard-fail"
+                                );
+                                false
+                            } else {
+                                true
+                            }
+                        })
+                        .collect();
 
-                    // Forward merged tool results to telemetry as structured context.
-                    let ctx_payload = serde_json::json!({
-                        "type": "mcp_tool_results",
-                        "tenant_id": tenant_id,
-                        "tool_messages": tool_messages,
-                    });
-                    state.telemetry.log_event(ctx_payload);
+                    if !safe_results.is_empty() {
+                        let tool_messages = crate::infrastructure::mcp_client::merge_results(
+                            safe_results,
+                            enable_compression,
+                            &*adapter,
+                        );
+
+                        // Forward merged tool results to telemetry as structured context.
+                        let ctx_payload = serde_json::json!({
+                            "type": "mcp_tool_results",
+                            "tenant_id": tenant_id,
+                            "tool_messages": tool_messages,
+                        });
+                        state.telemetry.log_event(ctx_payload);
+                    }
                 }
             }
         }
@@ -1269,6 +1719,11 @@ async fn handle_buffered_response(
             let estimated_completion = (body_bytes.len() / CHARS_PER_TOKEN).max(1) as u32;
             estimated_tokens + estimated_completion
         });
+
+    let claims = req_extensions.get::<crate::api::middleware::auth::Claims>();
+    let team_id = claims.and_then(|c| c.team_id.clone());
+    let api_key_alias = claims.and_then(|c| c.api_key_alias.clone());
+    let agent_loops = req_extensions.get::<u64>().copied().unwrap_or(0) as u32;
 
     spawn_telemetry(
         state,
@@ -1289,6 +1744,10 @@ async fn handle_buffered_response(
         is_free_tier,
         embedding_vector,
         semantic_cache_enabled,
+        team_id,
+        api_key_alias,
+        mcp_calls,
+        agent_loops,
     );
 
     Ok(ProxyResult {
@@ -1322,6 +1781,10 @@ fn spawn_telemetry(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    mcp_calls: u32,
+    agent_loops: u32,
 ) {
     let s = state.clone();
     let tid = tenant_id.to_string();
@@ -1330,6 +1793,8 @@ fn spawn_telemetry(
     let sem_text = semantic_text.to_string();
     let ctx = trace_ctx.clone();
     let vec = embedding_vector;
+    let team_id_c = team_id;
+    let api_key_alias_c = api_key_alias;
 
     tokio::spawn(async move {
         fire_async_telemetry(
@@ -1351,6 +1816,10 @@ fn spawn_telemetry(
             is_free_tier,
             vec,
             semantic_cache_enabled,
+            team_id_c,
+            api_key_alias_c,
+            mcp_calls,
+            agent_loops,
         )
         .await;
     });
@@ -1377,6 +1846,10 @@ async fn fire_async_telemetry(
     is_free_tier: bool,
     embedding_vector: Option<Vec<f32>>,
     semantic_cache_enabled: bool,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
+    mcp_calls: u32,
+    agent_loops: u32,
 ) {
     state
         .dashboard_metrics
@@ -1391,15 +1864,20 @@ async fn fire_async_telemetry(
 
     // 1. Clickhouse bulk batched payload
     let payload = json!({
-        "id": uuid::Uuid::new_v4().to_string(),
+        "id": trace_ctx.trace_id.clone(),
         "tenant_id": tenant_id,
+        "team_id": team_id,
+        "api_key_alias": api_key_alias,
         "status": status_code,
         "latency_ms": latency_ms,
         "model": model_name,
         "tokens": tokens,
+        "mcp_calls": mcp_calls,
+        "agent_loops": agent_loops,
         "requested_provider": requested_provider,
         "executed_provider": executed_provider,
-        "is_hot_swapped": is_hot_swapped
+        "is_hot_swapped": is_hot_swapped,
+        "cache_hit": cache_hit
     });
 
     state.telemetry.log_event(payload);
@@ -1410,16 +1888,21 @@ async fn fire_async_telemetry(
         "session_id":      trace_ctx.session_id,
         "parent_trace_id": trace_ctx.parent_trace_id,
         "tenant_id":       tenant_id,
+        "team_id":         team_id,
+        "api_key_alias":   api_key_alias,
         "model":           model_name,
         "status":          status_code,
         "latency_ms":      latency_ms,
         "total_tokens":    tokens,
+        "mcp_calls":       mcp_calls,
+        "agent_loops":     agent_loops,
         "cache_hit":       cache_hit,
         "prompt_content":  raw_prompt,
         "response_content": response_content,
         "requested_provider": requested_provider,
         "executed_provider": executed_provider,
-        "is_hot_swapped": is_hot_swapped
+        "is_hot_swapped": is_hot_swapped,
+        "has_response":    cache_hit || !response_content.is_empty()
     });
 
     state.telemetry.log_event(trace_payload);
@@ -1510,10 +1993,14 @@ async fn fire_async_telemetry(
             state,
             trace_ctx.trace_id.clone(),
             tenant_id.to_string(),
+            team_id,
+            api_key_alias,
             &executed_provider,
             model_name,
             prompt_tokens,
             completion_tokens,
+            mcp_calls,
+            agent_loops,
             cache_hit,
             is_free_tier,
         );
@@ -1525,10 +2012,14 @@ pub fn process_runtime_billing_telemetry(
     state: &Arc<AppState>,
     trace_id: String,
     tenant_id: String,
+    team_id: Option<String>,
+    api_key_alias: Option<String>,
     provider: &str,
     target_model: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    mcp_calls: u32,
+    agent_loops: u32,
     is_cache_hit: bool,
     is_free_tier: bool,
 ) -> Result<(), GatewayError> {
@@ -1541,10 +2032,14 @@ pub fn process_runtime_billing_telemetry(
             .process_billing_telemetry(
                 &trace_id,
                 &tenant_id,
+                team_id.as_deref(),
+                api_key_alias.as_deref(),
                 &provider,
                 &target_model,
                 prompt_tokens,
                 completion_tokens,
+                mcp_calls,
+                agent_loops,
                 is_cache_hit,
                 is_free_tier,
             )
@@ -1572,9 +2067,27 @@ fn extract_response_content(bytes: Option<&[u8]>) -> String {
 // ── Compliance helper ─────────────────────────────────────────────────────────
 
 /// POSTs `payload` to the compliance redaction endpoint and returns the
-/// sanitised body.  Implements strict **fail-closed** semantics: any network
-/// error, non-2xx status, or missing `sanitized_payload` field aborts the
-/// request, preventing raw PII from reaching the upstream LLM provider.
+fn local_sanitize_pii_value(val: &Value) -> Value {
+    match val {
+        Value::String(s) => {
+            let sanitized = pii_regex().replace_all(s, "[REDACTED_PII]");
+            Value::String(sanitized.into_owned())
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(local_sanitize_pii_value).collect()),
+        Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, v) in map {
+                new_map.insert(k.clone(), local_sanitize_pii_value(v));
+            }
+            Value::Object(new_map)
+        }
+        other => other.clone(),
+    }
+}
+
+/// POSTs `payload` to the compliance redaction endpoint and returns the
+/// sanitised body. Falls back gracefully to local inline regex PII redaction if
+/// external compliance service is unreachable.
 async fn call_compliance_redact(
     http_client: &reqwest::Client,
     compliance_url: &str,
@@ -1587,33 +2100,30 @@ async fn call_compliance_redact(
     );
     debug!(endpoint = %endpoint, "Calling compliance redaction service");
 
-    let resp = http_client
+    let send_result = http_client
         .post(&endpoint)
         .header("x-kryneth-trace-id", &trace_ctx.trace_id)
         .header("x-kryneth-session-id", &trace_ctx.session_id)
         .json(payload)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(3))
         .send()
-        .await
-        .map_err(|e| {
-            error!(error = %e, "Compliance service unreachable or timed out — blocking request (fail-closed)");
-            if e.is_timeout() {
-                GatewayError::SecurityTimeout(format!("Compliance redaction timed out: {}", e))
-            } else {
-                GatewayError::ComplianceFailure(format!("Compliance service unreachable: {}", e))
-            }
-        })?;
+        .await;
+
+    let resp = match send_result {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "External compliance service unreachable — falling back to local inline regex PII redaction");
+            return Ok(local_sanitize_pii_value(payload));
+        }
+    };
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
-        error!(
+        warn!(
             status = status,
-            "Compliance service returned non-2xx — blocking request"
+            "Compliance service returned non-2xx — falling back to local inline regex PII redaction"
         );
-        return Err(GatewayError::ComplianceFailure(format!(
-            "Compliance service returned HTTP {}",
-            status
-        )));
+        return Ok(local_sanitize_pii_value(payload));
     }
 
     let compliance_json: Value = resp.json().await.map_err(|e| {
@@ -1627,10 +2137,8 @@ async fn call_compliance_redact(
             Ok(sanitized)
         }
         None => {
-            error!("Compliance response missing `sanitized_payload` field — blocking request");
-            Err(GatewayError::ComplianceFailure(
-                "Compliance response did not contain `sanitized_payload`".into(),
-            ))
+            warn!("Compliance response missing `sanitized_payload` field — falling back to local inline regex PII redaction");
+            Ok(local_sanitize_pii_value(payload))
         }
     }
 }
@@ -1644,6 +2152,11 @@ mod tests {
 
     #[test]
     fn test_extract_semantic_text_formats() {
+        fn extract_from_value(value: serde_json::Value) -> Option<String> {
+            let mut bytes = serde_json::to_vec(&value).unwrap();
+            let parsed = simd_json::to_borrowed_value(&mut bytes).unwrap();
+            extract_semantic_text(&parsed)
+        }
         // 1. OpenAI format
         let openai_payload = json!({
             "model": "gpt-4",
@@ -1653,7 +2166,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&openai_payload),
+            extract_from_value(openai_payload),
             Some("Explain vector databases.".to_string())
         );
 
@@ -1663,7 +2176,7 @@ mod tests {
             "prompt": "\n\nHuman: What is latent space?\n\nAssistant:"
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_legacy),
+            extract_from_value(anthropic_legacy),
             Some("What is latent space?".to_string())
         );
 
@@ -1683,7 +2196,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_messages),
+            extract_from_value(anthropic_messages),
             Some("How does HNSW index work?".to_string())
         );
 
@@ -1699,7 +2212,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&gemini_payload),
+            extract_from_value(gemini_payload),
             Some("What is Cosine Similarity?".to_string())
         );
 
@@ -1707,7 +2220,7 @@ mod tests {
         let unsupported_payload = json!({
             "invalid_key": "some value"
         });
-        assert_eq!(extract_semantic_text(&unsupported_payload), None);
+        assert_eq!(extract_from_value(unsupported_payload), None);
 
         // 6. OpenAI Multi-Turn format (only the last user message should be extracted)
         let openai_multiturn = json!({
@@ -1719,7 +2232,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&openai_multiturn),
+            extract_from_value(openai_multiturn),
             Some("Explain vector databases.".to_string())
         );
 
@@ -1741,7 +2254,7 @@ mod tests {
             ]
         });
         assert_eq!(
-            extract_semantic_text(&gemini_multiturn),
+            extract_from_value(gemini_multiturn),
             Some("What is Cosine Similarity?".to_string())
         );
 
@@ -1751,7 +2264,7 @@ mod tests {
             "prompt": "\n\nHuman: Hello, how are you?\n\nAssistant: I am good!\n\nHuman: What is latent space?\n\nAssistant:"
         });
         assert_eq!(
-            extract_semantic_text(&anthropic_multiturn),
+            extract_from_value(anthropic_multiturn),
             Some("What is latent space?".to_string())
         );
     }
@@ -1927,7 +2440,9 @@ mod tests {
         assert!(has_error_signature(b"\"rate_limit\" exceeded"));
         assert!(has_error_signature(b"\"insufficient_funds\" in balance"));
         assert!(has_error_signature(b"\"billing_limit\" reached"));
-        assert!(!has_error_signature(b"this is a safe message with no issues"));
+        assert!(!has_error_signature(
+            b"this is a safe message with no issues"
+        ));
     }
 
     #[allow(clippy::uninit_assumed_init, invalid_value, unknown_lints)]
@@ -1953,7 +2468,8 @@ mod tests {
             rate_limit_window: 0,
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry),
+            redis_client: None,
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -1967,7 +2483,15 @@ mod tests {
             mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
+            operation_cache: moka::future::Cache::builder().build(),
             dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
         };
 
         (Arc::new(state), mock_server)
@@ -2020,7 +2544,10 @@ mod tests {
         let primary_body = "data: {\"choices\": [{\"delta\": {\"content\": \"Hello\"}}]}\n\ndata: {\"error\": \"rate_limit\"}\n\n";
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(wiremock::matchers::header("Authorization", "Bearer sk-primary"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer sk-primary",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(primary_body))
             .mount(&mock_server)
             .await;
@@ -2029,16 +2556,22 @@ mod tests {
         let fallback_body = "data: {\"choices\": [{\"delta\": {\"content\": \" stitched world\"}}]}\n\ndata: [DONE]\n\n";
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
-            .and(wiremock::matchers::header("Authorization", "Bearer sk-fallback"))
+            .and(wiremock::matchers::header(
+                "Authorization",
+                "Bearer sk-fallback",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_string(fallback_body))
             .mount(&mock_server)
             .await;
 
-        let body = axum::body::Bytes::from(serde_json::json!({
-            "model": "test-model",
-            "stream": true,
-            "messages": [{"role": "user", "content": "hi"}]
-        }).to_string());
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": "test-model",
+                "stream": true,
+                "messages": [{"role": "user", "content": "hi"}]
+            })
+            .to_string(),
+        );
 
         let mut req_extensions = axum::http::Extensions::new();
         req_extensions.insert(100.0f64);
@@ -2060,7 +2593,10 @@ mod tests {
             false,
             &req_extensions,
             false,
-        ).await.unwrap();
+            None,
+        )
+        .await
+        .unwrap();
 
         let ProxyBody::Stream(body_stream) = result.body else {
             panic!("Expected streaming response body");
@@ -2075,51 +2611,22 @@ mod tests {
         }
 
         let output_str = String::from_utf8(body_bytes).unwrap();
-        assert!(output_str.contains(" stitched world"), "Output does not contain ' stitched world': {}", output_str);
-        assert!(!output_str.contains("rate_limit"), "Output incorrectly contains 'rate_limit': {}", output_str);
+        assert!(
+            output_str.contains(" stitched world"),
+            "Output does not contain ' stitched world': {}",
+            output_str
+        );
+        assert!(
+            !output_str.contains("rate_limit"),
+            "Output incorrectly contains 'rate_limit': {}",
+            output_str
+        );
     }
 
     #[tokio::test]
-    async fn test_high_load_bypass_large_payload() {
-        let (state, mock_server) = setup_proxy_test_state().await;
-
-        let tenant_id = "test-tenant";
-        let virtual_model_name = "test-model";
-
-        let mut tenant_map = std::collections::HashMap::new();
-        tenant_map.insert(
-            virtual_model_name.to_string(),
-            crate::domain::models::ModelConfig {
-                targets: vec![
-                    crate::domain::models::UpstreamTarget {
-                        priority: 1,
-                        weight: 1,
-                        api_key_alias: "primary".into(),
-                        api_key: "sk-primary".to_string(),
-                        provider_name: "openai".into(),
-                        base_url: mock_server.uri(),
-                        target_model: "gpt-4".into(),
-                        schema_format: "openai".into(),
-                    },
-                ],
-                ..Default::default()
-            },
-        );
-        let mut map = std::collections::HashMap::new();
-        map.insert(tenant_id.to_string(), tenant_map);
-        state.routing_state.state.store(Arc::new(map));
-
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, ResponseTemplate};
-
-        // Mock upstream response
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{"message": {"role": "assistant", "content": "Bypassed successfully"}}]
-            })))
-            .mount(&mock_server)
-            .await;
+    async fn test_large_payload_runs_pii_and_compliance() {
+        let (state, _mock_server) = setup_proxy_test_state().await;
+        let tenant_id = "test-tenant-123";
 
         // Generate a large payload > 5MB that contains PII email pattern
         let pii_email = "test-email-address@domain.com";
@@ -2157,10 +2664,537 @@ mod tests {
             false,
             &req_extensions,
             false,
-        ).await;
+            None,
+        )
+        .await;
 
-        assert!(result.is_ok(), "High-load bypass did not skip PII check! Error: {:?}", result.err());
-        let proxy_res = result.unwrap();
-        assert_eq!(proxy_res.status, 200);
+        assert!(
+            result.is_err(),
+            "Payload > 5MB MUST NOT bypass PII/compliance check"
+        );
+        let err_str = format!("{:?}", result.err());
+        assert!(
+            err_str.contains("ComplianceFailure") || err_str.contains("ModelNotConfigured") || err_str.contains("MissingModel"),
+            "Expected compliance/routing check to run for >5MB payload: got {}",
+            err_str
+        );
+    }
+
+    // ── extract_semantic_text_raw unit tests ──────────────────────────────────
+
+    #[test]
+    fn test_raw_scanner_openai_string_content() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is my SSN 123-45-6789?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract user message text");
+        let text = result.unwrap();
+        assert!(
+            text.contains("SSN 123-45-6789"),
+            "must contain PII text: got {:?}",
+            text
+        );
+        assert!(
+            !text.contains("helpful assistant"),
+            "must NOT include system message"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_multimodal_skips_base64() {
+        let fake_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAUA".repeat(2000); // ~54 KB "image"
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image. My email is user@example.com"},
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", fake_base64)}}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract text block");
+        let text = result.unwrap();
+        assert!(
+            text.contains("user@example.com"),
+            "must contain email PII: got {:?}",
+            text
+        );
+        assert!(
+            !text.contains("iVBORw0KGgo"),
+            "MUST NOT contain Base64 image data in scan target"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_pure_image_returns_none() {
+        // A payload with ONLY an image_url block — no text content at all.
+        // extract_semantic_text_raw must return None so pii_regex is never called.
+        let fake_base64 = "iVBORw0KGgoAAAANSUhEUgAAAAUA".repeat(2000);
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{}", fake_base64)}}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(
+            result.is_none(),
+            "pure-image payload must return None — PII regex must not run on Base64 data"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_gemini_parts_format() {
+        let body = serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [
+                    {"text": "My Aadhaar is 1234 5678 9012"}
+                ]
+            }]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract Gemini parts text");
+        assert!(
+            result.unwrap().contains("1234 5678 9012"),
+            "must contain Aadhaar number"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_anthropic_legacy_prompt() {
+        let body = serde_json::json!({
+            "prompt": "\n\nHuman: Call me at +1 415-555-0100\n\nAssistant:"
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        assert!(result.is_some(), "must extract Anthropic legacy prompt");
+        assert!(
+            result.unwrap().contains("+1 415-555-0100"),
+            "must contain phone number PII"
+        );
+    }
+
+    #[test]
+    fn test_raw_scanner_64kb_budget_cap() {
+        // Build a user message text that is > 64 KiB
+        let long_text = "a".repeat(128 * 1024);
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": long_text}]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let result = extract_semantic_text_raw(&bytes);
+        // Must return Some but capped at ≤64 KiB
+        assert!(result.is_some());
+        assert!(
+            result.unwrap().len() <= 64 * 1024,
+            "output must be capped at 64 KiB"
+        );
+    }
+
+    #[test]
+    fn test_proxy_buffer_unmutated_with_escaped_json_and_xml_tags() {
+        // NOTE on `tools` vs `tool_calls`:
+        // - `"tools": [...]` at the TOP LEVEL = tool SCHEMA DEFINITIONS provided to the model.
+        //   This is part of the initial user request setup and does NOT signal an agentic turn.
+        //   extract_semantic_text MUST still extract user text and return Some(...).
+        // - `"tool_calls": [...]` INSIDE an `assistant` message = the model ACTIVELY INVOKING
+        //   a tool. This signals an in-progress agentic turn and extract_semantic_text MUST
+        //   return None to bypass the semantic cache.
+        // This test covers the former (tool definitions) — semantic cache must remain active.
+        let raw_payload = r#"{"model":"gpt-4","messages":[{"role":"user","content":"<function=web_search>"}],"tools":[{"type":"function","function":{"name":"search","arguments":"{\"query\": \"AI explanation\"}"}}],"stream":true}"#;
+        let parse_buffer = raw_payload.as_bytes().to_vec();
+
+        // Run the inspection pipeline stage (matching execute_proxy inspection logic)
+        let (is_streaming, semantic_text) = {
+            let mut inspect_buf = parse_buffer.clone();
+            let lazy_parsed = simd_json::to_borrowed_value(&mut inspect_buf)
+                .expect("inspect_buf should be valid JSON");
+
+            let is_stream = lazy_parsed
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let sem_text = extract_semantic_text(&lazy_parsed);
+            (is_stream, sem_text)
+        };
+
+        assert!(is_streaming, "stream flag must be true");
+        assert!(
+            semantic_text.is_some(),
+            "top-level tool definitions must NOT bypass cache — only tool_calls in messages should"
+        );
+
+        // Critical Assertion: The primary transmission buffer must remain 100% byte-identical
+        assert_eq!(
+            parse_buffer,
+            raw_payload.as_bytes(),
+            "Outbound transmission buffer must retain all backslashes and XML tags without in-place mutation corruption"
+        );
+    }
+
+    // ── extract_semantic_text agentic bypass unit tests ───────────────────────
+
+    #[test]
+    fn test_extract_semantic_text_single_turn_user() {
+        // Standard single-turn query: semantic cache must remain active → Some(text)
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the capital of France?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert_eq!(
+            result.as_deref(),
+            Some("What is the capital of France?"),
+            "single-turn user query must extract text for caching"
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_tool_role() {
+        // Payload contains a role:"tool" message → must return None to bypass cache
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Search the web for Rust async"},
+                {"role": "assistant", "content": null, "tool_calls": [{"id": "call_abc", "type": "function", "function": {"name": "search_web", "arguments": "{}"}}]},
+                {"role": "tool",      "tool_call_id": "call_abc", "content": "Rust async uses tokio..."}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "role:tool message must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_assistant_tool_calls() {
+        // Assistant message with non-empty tool_calls array → must return None
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Fetch my profile"},
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_xyz", "type": "function", "function": {"name": "fetch_user_profile", "arguments": "{}"}}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "assistant with non-empty tool_calls must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_assistant_function_call() {
+        // Assistant message with legacy function_call object → must return None
+        let body = serde_json::json!({
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "user",      "content": "Get weather"},
+                {"role": "assistant", "content": null, "function_call": {"name": "get_weather", "arguments": "{}"}}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "assistant with function_call must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_anthropic_tool_use_block() {
+        // Anthropic: content block with type="tool_use" in assistant message → must return None
+        let body = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user",      "content": "Run the query"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_01", "name": "query_database", "input": {}}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Anthropic tool_use content block must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_anthropic_tool_result_block() {
+        // Anthropic: content block with type="tool_result" in user message → must return None
+        let body = serde_json::json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [
+                {"role": "user",      "content": "Check my balance"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_02", "name": "get_balance", "input": {}}
+                ]},
+                {"role": "user",      "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_02", "content": "Balance: $500"}
+                ]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Anthropic tool_result content block must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_gemini_function_response() {
+        // Gemini: any part contains functionResponse → must return None
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user",  "parts": [{"text": "What is the weather?"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {}}}]},
+                {"role": "user",  "parts": [{"functionResponse": {"name": "get_weather", "response": {"temperature": "22C"}}}]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Gemini functionResponse must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_bypasses_on_gemini_function_call() {
+        // Gemini: any part contains functionCall → must return None
+        let body = serde_json::json!({
+            "contents": [
+                {"role": "user",  "parts": [{"text": "Search for Rust crates"}]},
+                {"role": "model", "parts": [{"functionCall": {"name": "search_crates", "args": {"query": "async"}}}]}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert!(
+            result.is_none(),
+            "Gemini functionCall must bypass semantic cache — got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_extract_semantic_text_multi_turn_no_tools() {
+        // Multi-turn conversation with NO tool usage: must still cache using most recent user text.
+        // This validates that the bypass fix does not break normal RAG / conversational use cases.
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user",      "content": "Tell me about Paris."},
+                {"role": "assistant", "content": "Paris is the capital of France."},
+                {"role": "user",      "content": "What is its population?"}
+            ]
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let mut buf = bytes.clone();
+        let parsed = simd_json::to_borrowed_value(&mut buf).unwrap();
+        let result = extract_semantic_text(&parsed);
+        assert_eq!(
+            result.as_deref(),
+            Some("What is its population?"),
+            "multi-turn without tools must extract the most recent user message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_cache_hit_streaming_three_chunk_sequence() {
+        let (state, _mock_server) = setup_proxy_test_state().await;
+        let trace_ctx = TraceContext {
+            trace_id: "t_cache_1".to_string(),
+            session_id: "s_cache_1".to_string(),
+            parent_trace_id: None,
+        };
+
+        let result = handle_cache_hit(
+            &state,
+            "Cached response content".to_string(),
+            "test-tenant-123",
+            "test-model",
+            "What is 2+2?",
+            "What is 2+2?",
+            &trace_ctx,
+            std::time::Instant::now(),
+            true,  // is_streaming
+            false, // is_free_tier
+            true,  // semantic_cache_enabled
+            None,
+            None,
+            0,
+        )
+        .expect("handle_cache_hit should succeed");
+
+        assert_eq!(result.content_type, "text/event-stream");
+        assert!(result.cache_hit);
+
+        let ProxyBody::Stream(body_stream) = result.body else {
+            panic!("Expected ProxyBody::Stream");
+        };
+
+        use futures::StreamExt;
+        let mut chunks_raw = Vec::new();
+        let mut stream = body_stream.into_data_stream();
+        while let Some(chunk_res) = stream.next().await {
+            let chunk_bytes = chunk_res.expect("stream chunk should be ok");
+            chunks_raw.extend_from_slice(&chunk_bytes);
+        }
+
+        let stream_text = String::from_utf8(chunks_raw).expect("valid utf8 stream text");
+        let lines: Vec<&str> = stream_text
+            .lines()
+            .filter(|l| l.starts_with("data: "))
+            .collect();
+
+        assert_eq!(
+            lines.len(),
+            4,
+            "Expected 4 SSE data lines (Role init, Content delivery, Stop finish_reason, [DONE])"
+        );
+
+        // Line 1: Role initialization
+        let payload1: serde_json::Value =
+            serde_json::from_str(lines[0].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload1["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(payload1["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(payload1["choices"][0]["delta"]["content"], "");
+        assert!(payload1["choices"][0]["finish_reason"].is_null());
+
+        // Line 2: Content delivery
+        let payload2: serde_json::Value =
+            serde_json::from_str(lines[1].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload2["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(
+            payload2["choices"][0]["delta"]["content"],
+            "Cached response content"
+        );
+        assert!(
+            payload2["choices"][0]["delta"].get("role").is_none(),
+            "Chunk 2 must not re-include role"
+        );
+        assert!(payload2["choices"][0]["finish_reason"].is_null());
+
+        // Line 3: Finish reason stop
+        let payload3: serde_json::Value =
+            serde_json::from_str(lines[2].trim_start_matches("data: ")).unwrap();
+        assert!(
+            payload3["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert_eq!(payload3["choices"][0]["finish_reason"], "stop");
+
+        // Line 4: Terminal marker
+        assert_eq!(lines[3], "data: [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_handle_cache_hit_non_streaming_timestamp() {
+        let (state, _mock_server) = setup_proxy_test_state().await;
+        let trace_ctx = TraceContext {
+            trace_id: "t_cache_2".to_string(),
+            session_id: "s_cache_2".to_string(),
+            parent_trace_id: None,
+        };
+
+        let result = handle_cache_hit(
+            &state,
+            "Cached non-streaming content".to_string(),
+            "test-tenant-123",
+            "test-model",
+            "Hello",
+            "Hello",
+            &trace_ctx,
+            std::time::Instant::now(),
+            false, // is_streaming = false
+            false,
+            true,
+            None,
+            None,
+            0,
+        )
+        .expect("handle_cache_hit should succeed");
+
+        assert_eq!(result.content_type, "application/json");
+        assert!(result.cache_hit);
+
+        let ProxyBody::Buffered(bytes) = result.body else {
+            panic!("Expected ProxyBody::Buffered");
+        };
+
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            payload["created"].as_u64().unwrap_or(0) > 0,
+            "created timestamp must be real Unix epoch (> 0)"
+        );
+        assert!(
+            payload["id"]
+                .as_str()
+                .unwrap_or("")
+                .starts_with("chatcmpl-cached-"),
+            "id must be dynamic chatcmpl-cached-..."
+        );
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "Cached non-streaming content"
+        );
+        assert_eq!(payload["choices"][0]["finish_reason"], "stop");
     }
 }

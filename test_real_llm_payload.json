@@ -1,0 +1,28 @@
+{
+  "model": "llama-3.3-70b-versatile",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Can you search GitHub for repositories related to https://github.com/Mspanti/AegisPass with in the last 6 months any updates?"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_repositories",
+        "description": "Search for GitHub repositories using a query string.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search query like language:rust kryneth"
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    }
+  ]
+}

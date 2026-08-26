@@ -1,4 +1,4 @@
-//! infrastructure/mcp_client.rs — Tunnel 3 
+//! infrastructure/mcp_client.rs — Tunnel 3
 //!
 //! ## Architecture (Phase 4 upgrade)
 //! ```text
@@ -20,14 +20,55 @@
 //! * **Strict merge format**: `[{"tool":"A","result":{...}}, {"tool":"B","result":{"error":"..."}}]`
 //!   — LLM always receives a uniform array regardless of partial failures.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::domain::models::AppState;
+use crate::domain::models::{AppState, OpState};
+use crate::domain::utp_models::{ToolExecutionStatus, UniversalToolResult};
+use crate::infrastructure::providers::traits::UniversalProviderAdapter;
+
+// ── Idempotency helpers ────────────────────────────────────────────────────────
+
+/// Recursively converts all JSON Object keys to sorted BTreeMap representations for deep canonicalization.
+pub fn canonicalize_json(val: Value) -> Value {
+    match val {
+        Value::Object(map) => {
+            let sorted: BTreeMap<String, Value> = map
+                .into_iter()
+                .map(|(k, v)| (k, canonicalize_json(v)))
+                .collect();
+            serde_json::to_value(sorted).unwrap_or(Value::Null)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(canonicalize_json).collect()),
+        other => other,
+    }
+}
+
+/// Generates a deterministic SHA-256 idempotency key: Hash(tenant_id + tool_name + sorted_json_args)
+pub fn generate_idempotency_key(tenant_id: &str, tool_name: &str, raw_args: &str) -> String {
+    let canonical_args = match serde_json::from_str::<Value>(raw_args) {
+        Ok(val) => {
+            let canonical_val = canonicalize_json(val);
+            serde_json::to_string(&canonical_val).unwrap_or_else(|_| raw_args.to_string())
+        }
+        Err(_) => raw_args.to_string(),
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(tenant_id.as_bytes());
+    hasher.update(b"::");
+    hasher.update(tool_name.as_bytes());
+    hasher.update(b"::");
+    hasher.update(canonical_args.as_bytes());
+
+    hex::encode(hasher.finalize())
+}
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -59,41 +100,25 @@ pub struct ToolResult {
 
 // ── Public entry point ────────────────────────────────────────────────────────
 
-/// Parses `tool_calls` from an LLM response body and returns them as a
-/// `Vec<ToolCall>`.
+/// Parses `tool_calls` from an LLM response body using the provided UTP `adapter`
+/// and returns them as a `Vec<ToolCall>`.
 ///
 /// Returns an empty `Vec` when no `tool_calls` are present or parsing fails.
-pub fn extract_tool_calls(response_body: &[u8]) -> Vec<ToolCall> {
-    let val: Value = match serde_json::from_slice(response_body) {
-        Ok(v) => v,
+pub fn extract_tool_calls(
+    response_body: &[u8],
+    adapter: &dyn UniversalProviderAdapter,
+) -> Vec<ToolCall> {
+    let universal_calls = match adapter.extract_calls(response_body) {
+        Ok(calls) => calls,
         Err(_) => return Vec::new(),
     };
 
-    let arr = match val.pointer("/choices/0/message/tool_calls") {
-        Some(Value::Array(a)) => a,
-        _ => return Vec::new(),
-    };
-
-    arr.iter()
-        .filter_map(|tc| {
-            let id = tc.get("id")?.as_str()?.to_string();
-            let name = tc.pointer("/function/name")?.as_str()?.to_string();
-            let arguments = tc
-                .pointer("/function/arguments")
-                .and_then(|a| {
-                    if a.is_string() {
-                        a.as_str().map(|s| s.to_string())
-                    } else {
-                        Some(a.to_string())
-                    }
-                })
-                .unwrap_or_else(|| "{}".to_string());
-
-            Some(ToolCall {
-                id,
-                name,
-                arguments,
-            })
+    universal_calls
+        .into_iter()
+        .map(|c| ToolCall {
+            id: c.call_id,
+            name: c.tool_name,
+            arguments: c.arguments,
         })
         .collect()
 }
@@ -136,15 +161,212 @@ pub async fn fan_out(
             let state = state.clone();
             let tenant_id_c = tenant_id_owned.clone();
             async move {
-                // Per-call 5-second hard timeout.
-                match timeout(
-                    std::time::Duration::from_secs(5),
-                    execute_single_tool_call(tc.clone(), &tenant_id_c, &state, enable_compression),
-                )
-                .await
-                {
-                    Ok(result) => result,
+                let op_key = generate_idempotency_key(&tenant_id_c, &tc.name, &tc.arguments);
+
+                // 1. Check if state already exists in operation_cache
+                if let Some(existing_state) = state.operation_cache.get(&op_key).await {
+                    match existing_state {
+                        OpState::Completed { content, latency_ms } => {
+                            info!(
+                                tool_name = %tc.name,
+                                op_key = %op_key,
+                                "Semantic MCP Idempotency — returning cached result"
+                            );
+                            return ToolResult {
+                                tool_call_id: tc.id,
+                                name: tc.name,
+                                content,
+                                latency_ms,
+                                success: true,
+                            };
+                        }
+                        OpState::InProgress { lease_until } => {
+                            let now = std::time::Instant::now();
+                            if now < lease_until {
+                                state
+                                    .dashboard_metrics
+                                    .mcp_already_in_flight_blocked
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                warn!(
+                                    tool_name = %tc.name,
+                                    op_key = %op_key,
+                                    "Semantic MCP Idempotency — call already in flight"
+                                );
+                                return ToolResult {
+                                    tool_call_id: tc.id,
+                                    name: tc.name,
+                                    content: r#"{"error":"ALREADY_IN_FLIGHT"}"#.to_string(),
+                                    latency_ms: 0,
+                                    success: false,
+                                };
+                            } else {
+                                state
+                                    .dashboard_metrics
+                                    .mcp_previous_attempt_unknown_blocked
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                warn!(
+                                    tool_name = %tc.name,
+                                    op_key = %op_key,
+                                    "Semantic MCP Idempotency — expired lease lock"
+                                );
+                                return ToolResult {
+                                    tool_call_id: tc.id,
+                                    name: tc.name,
+                                    content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
+                                    latency_ms: 0,
+                                    success: false,
+                                };
+                            }
+                        }
+                        OpState::Unknown => {
+                            state
+                                .dashboard_metrics
+                                .mcp_previous_attempt_unknown_blocked
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            warn!(
+                                tool_name = %tc.name,
+                                op_key = %op_key,
+                                "Semantic MCP Idempotency — previous attempt failed/timed out, auto-retry blocked"
+                            );
+                            return ToolResult {
+                                tool_call_id: tc.id,
+                                name: tc.name,
+                                content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
+                                latency_ms: 0,
+                                success: false,
+                            };
+                        }
+                    }
+                }
+
+                // 2. Use Moka get_with to atomically lock the key if vacant (TOCTOU stampede prevention)
+                let lease_until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                let current_state = state
+                    .operation_cache
+                    .get_with(op_key.clone(), async {
+                        OpState::InProgress { lease_until }
+                    })
+                    .await;
+
+                match current_state {
+                    OpState::Completed { content, latency_ms } => {
+                        return ToolResult {
+                            tool_call_id: tc.id,
+                            name: tc.name,
+                            content,
+                            latency_ms,
+                            success: true,
+                        };
+                    }
+                    OpState::InProgress { lease_until: locked_until } => {
+                        if locked_until != lease_until {
+                            let now = std::time::Instant::now();
+                            if now < locked_until {
+                                state
+                                    .dashboard_metrics
+                                    .mcp_already_in_flight_blocked
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return ToolResult {
+                                    tool_call_id: tc.id,
+                                    name: tc.name,
+                                    content: r#"{"error":"ALREADY_IN_FLIGHT"}"#.to_string(),
+                                    latency_ms: 0,
+                                    success: false,
+                                };
+                            } else {
+                                state
+                                    .dashboard_metrics
+                                    .mcp_previous_attempt_unknown_blocked
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                return ToolResult {
+                                    tool_call_id: tc.id,
+                                    name: tc.name,
+                                    content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
+                                    latency_ms: 0,
+                                    success: false,
+                                };
+                            }
+                        }
+                    }
+                    OpState::Unknown => {
+                        state
+                            .dashboard_metrics
+                            .mcp_previous_attempt_unknown_blocked
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return ToolResult {
+                            tool_call_id: tc.id,
+                            name: tc.name,
+                            content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
+                            latency_ms: 0,
+                            success: false,
+                        };
+                    }
+                }
+
+                // 3. Current thread claimed lease (locked_until == lease_until).
+                // Spawn tool call in a detached task so execution survives client disconnects.
+                let tc_task = tc.clone();
+                let tenant_id_task = tenant_id_c.clone();
+                let state_task = state.clone();
+                let op_key_task = op_key.clone();
+
+                let exec_handle = tokio::spawn(async move {
+                    let res = execute_single_tool_call(
+                        tc_task,
+                        &tenant_id_task,
+                        &state_task,
+                        enable_compression,
+                    )
+                    .await;
+
+                    if res.success {
+                        state_task
+                            .operation_cache
+                            .insert(
+                                op_key_task,
+                                OpState::Completed {
+                                    content: res.content.clone(),
+                                    latency_ms: res.latency_ms,
+                                },
+                            )
+                            .await;
+                    } else {
+                        state_task
+                            .operation_cache
+                            .insert(op_key_task, OpState::Unknown)
+                            .await;
+                    }
+                    res
+                });
+
+                let exec_res = timeout(std::time::Duration::from_secs(5), exec_handle).await;
+
+                match exec_res {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(join_err)) => {
+                        state
+                            .operation_cache
+                            .insert(op_key, OpState::Unknown)
+                            .await;
+                        warn!(
+                            tool_name = %tc.name,
+                            error = %join_err,
+                            "Tunnel 3 Phase 4 — MCP tool call task failed/cancelled"
+                        );
+                        ToolResult {
+                            tool_call_id: tc.id,
+                            name: tc.name,
+                            content: r#"{"error":"MCP_TASK_FAILED"}"#.to_string(),
+                            latency_ms: 5000,
+                            success: false,
+                        }
+                    }
                     Err(_elapsed) => {
+                        // Timeout: spawned task continues running in background and will set OpState on finish
+                        state
+                            .operation_cache
+                            .insert(op_key, OpState::Unknown)
+                            .await;
                         warn!(
                             tool_name = %tc.name,
                             "Tunnel 3 Phase 4 — MCP tool call timed out (5s)"
@@ -187,35 +409,29 @@ pub async fn fan_out(
     results
 }
 
-/// Serialises a `Vec<ToolResult>` into the strict Phase 4 merge format:
-///
-/// ```json
-/// [
-///   {"tool": "jira_search",  "result": {"tickets": [...]}},
-///   {"tool": "github_search", "result": {"error": "MCP_TIMEOUT"}}
-/// ]
-/// ```
-///
-/// This uniform array is appended to the LLM's next-turn `messages` as a
-/// single `role: "tool"` message, giving the model full context of every
-/// call outcome — successes and timeouts alike.
-pub fn merge_results(results: Vec<ToolResult>, _enable_compression: bool) -> Vec<Value> {
-    results
+/// Serialises a `Vec<ToolResult>` into provider-native format using the UTP `adapter`.
+pub fn merge_results(
+    results: Vec<ToolResult>,
+    _enable_compression: bool,
+    adapter: &dyn UniversalProviderAdapter,
+) -> Value {
+    let universal_results: Vec<UniversalToolResult> = results
         .into_iter()
-        .map(|r| {
-            // Parse content as JSON if possible (MCP servers return structured data).
-            // Fallback to wrapping the raw string in a {"text": "..."} object.
-            let result_val: Value =
-                serde_json::from_str(&r.content).unwrap_or_else(|_| json!({"text": r.content}));
-
-            json!({
-                "tool": r.name,
-                "result": result_val,
-                "latency_ms": r.latency_ms,
-                "success": r.success,
-            })
+        .map(|r| UniversalToolResult {
+            call_id: r.tool_call_id,
+            status: if r.success {
+                ToolExecutionStatus::Success
+            } else {
+                ToolExecutionStatus::Error
+            },
+            content: r.content,
+            latency_ms: r.latency_ms,
         })
-        .collect()
+        .collect();
+
+    adapter
+        .format_results(&universal_results)
+        .unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -348,7 +564,9 @@ fn convert_to_toon(json_array: &Vec<serde_json::Value>) -> Result<String, &'stat
         return Ok("array[0]{}:".to_string());
     }
 
-    let first_obj = json_array[0].as_object().ok_or("First element is not an object")?;
+    let first_obj = json_array[0]
+        .as_object()
+        .ok_or("First element is not an object")?;
     let mut keys: Vec<&str> = first_obj.keys().map(|k| k.as_str()).collect();
     keys.sort();
 
@@ -382,7 +600,12 @@ fn convert_to_toon(json_array: &Vec<serde_json::Value>) -> Result<String, &'stat
     }
 
     let rows_str = rows.join(" \n ");
-    Ok(format!("array[{}]{{{}}}: \n {}", json_array.len(), keys_str, rows_str))
+    Ok(format!(
+        "array[{}]{{{}}}: \n {}",
+        json_array.len(),
+        keys_str,
+        rows_str
+    ))
 }
 
 /// Reads the MCP server response and extracts the `result.content[0].text`
@@ -425,6 +648,15 @@ fn build_telemetry_payload(
     total_latency_ms: u64,
     tenant_id: &str,
 ) -> Value {
+    let in_flight_count = results
+        .iter()
+        .filter(|r| r.content.contains("ALREADY_IN_FLIGHT"))
+        .count();
+    let unknown_retry_blocked_count = results
+        .iter()
+        .filter(|r| r.content.contains("PREVIOUS_ATTEMPT_UNKNOWN"))
+        .count();
+
     let tool_metrics: Vec<Value> = results
         .iter()
         .map(|r| {
@@ -432,6 +664,8 @@ fn build_telemetry_payload(
                 "tool_name": r.name,
                 "tool_latency_ms": r.latency_ms,
                 "success": r.success,
+                "in_flight": r.content.contains("ALREADY_IN_FLIGHT"),
+                "unknown_retry_blocked": r.content.contains("PREVIOUS_ATTEMPT_UNKNOWN"),
             })
         })
         .collect();
@@ -442,6 +676,8 @@ fn build_telemetry_payload(
         "fan_out_count": fan_out_count,
         "total_latency_ms": total_latency_ms,
         "success_count": results.iter().filter(|r| r.success).count(),
+        "already_in_flight_count": in_flight_count,
+        "unknown_retry_blocked_count": unknown_retry_blocked_count,
         "tools": tool_metrics,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     })
@@ -455,6 +691,7 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_parses_correctly() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let body = serde_json::json!({
             "choices": [{
                 "message": {
@@ -482,7 +719,7 @@ mod tests {
         });
 
         let bytes = serde_json::to_vec(&body).unwrap();
-        let calls = extract_tool_calls(&bytes);
+        let calls = extract_tool_calls(&bytes, &adapter);
 
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[0].id, "call_abc");
@@ -492,21 +729,24 @@ mod tests {
 
     #[test]
     fn test_extract_tool_calls_empty_on_no_tool_calls() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let body = serde_json::json!({
             "choices": [{"message": {"role": "assistant", "content": "Hello"}}]
         });
         let bytes = serde_json::to_vec(&body).unwrap();
-        assert!(extract_tool_calls(&bytes).is_empty());
+        assert!(extract_tool_calls(&bytes, &adapter).is_empty());
     }
 
     #[test]
     fn test_extract_tool_calls_no_panic_on_malformed() {
-        assert!(extract_tool_calls(b"{invalid}").is_empty());
-        assert!(extract_tool_calls(b"").is_empty());
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
+        assert!(extract_tool_calls(b"{invalid}", &adapter).is_empty());
+        assert!(extract_tool_calls(b"", &adapter).is_empty());
     }
 
     #[test]
     fn test_merge_results_strict_array_format() {
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let results = vec![
             ToolResult {
                 tool_call_id: "call_abc".to_string(),
@@ -524,31 +764,24 @@ mod tests {
             },
         ];
 
-        let merged = merge_results(results, false);
-        assert_eq!(merged.len(), 2);
+        let merged = merge_results(results, false, &adapter);
+        assert!(merged.is_array());
+        let arr = merged.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
 
-        // First entry: successful structured result.
-        assert_eq!(merged[0]["tool"], "jira_search");
-        assert_eq!(merged[0]["success"], true);
-        assert!(
-            merged[0]["result"]["tickets"].is_array(),
-            "result should be parsed JSON"
-        );
+        // First entry: OpenAI format tool message
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[0]["tool_call_id"], "call_abc");
 
-        // Second entry: timeout placeholder.
-        assert_eq!(merged[1]["tool"], "github_search");
-        assert_eq!(merged[1]["success"], false);
-        assert_eq!(
-            merged[1]["result"]["error"].as_str(),
-            Some("MCP_TIMEOUT"),
-            "timeout result must carry MCP_TIMEOUT error key"
-        );
-        assert_eq!(merged[1]["latency_ms"], 5000);
+        // Second entry: timeout result
+        assert_eq!(arr[1]["role"], "tool");
+        assert_eq!(arr[1]["tool_call_id"], "call_def");
+        assert!(arr[1]["content"].as_str().unwrap().contains("MCP_TIMEOUT"));
     }
 
     #[test]
     fn test_merge_results_plain_text_fallback() {
-        // Non-JSON content must be wrapped in {"text": "..."}.
+        let adapter = crate::infrastructure::providers::OpenAIPlugin::new();
         let results = vec![ToolResult {
             tool_call_id: "c1".to_string(),
             name: "plain_tool".to_string(),
@@ -556,12 +789,12 @@ mod tests {
             latency_ms: 50,
             success: true,
         }];
-        let merged = merge_results(results, false);
-        assert_eq!(
-            merged[0]["result"]["text"].as_str(),
-            Some("plain text result"),
-            "Plain text content must be wrapped in text key"
-        );
+        let merged = merge_results(results, false, &adapter);
+        assert!(merged.is_array());
+        let arr = merged.as_array().unwrap();
+        assert_eq!(arr[0]["role"], "tool");
+        assert_eq!(arr[0]["tool_call_id"], "c1");
+        assert_eq!(arr[0]["content"], "plain text result");
     }
 
     #[test]
@@ -608,5 +841,156 @@ mod tests {
         let res = convert_to_toon(&data);
         assert!(res.is_err());
         assert_eq!(res.unwrap_err(), "Heterogeneous JSON");
+    }
+
+    #[test]
+    fn test_deep_canonicalize_json() {
+        let raw1 = serde_json::json!({
+            "user": "Alex",
+            "metadata": {
+                "b": 1,
+                "a": 2,
+                "nested": { "z": 9, "y": 8 }
+            },
+            "tags": ["x", "y"]
+        });
+
+        let raw2 = serde_json::json!({
+            "metadata": {
+                "nested": { "y": 8, "z": 9 },
+                "a": 2,
+                "b": 1
+            },
+            "tags": ["x", "y"],
+            "user": "Alex"
+        });
+
+        let canonical1 = canonicalize_json(raw1);
+        let canonical2 = canonicalize_json(raw2);
+
+        let str1 = serde_json::to_string(&canonical1).unwrap();
+        let str2 = serde_json::to_string(&canonical2).unwrap();
+
+        assert_eq!(str1, str2);
+        assert_eq!(
+            str1,
+            r#"{"metadata":{"a":2,"b":1,"nested":{"y":8,"z":9}},"tags":["x","y"],"user":"Alex"}"#
+        );
+    }
+
+    #[test]
+    fn test_generate_idempotency_key_canonicalization() {
+        let args1 = r#"{"user":"Alex","metadata":{"b":1,"a":2}}"#;
+        let args2 = r#"{"metadata":{"a":2,"b":1},"user":"Alex"}"#;
+
+        let key1 = generate_idempotency_key("tenant_123", "process_refund", args1);
+        let key2 = generate_idempotency_key("tenant_123", "process_refund", args2);
+
+        assert_eq!(key1, key2);
+
+        // Different tenant produces different key
+        let key3 = generate_idempotency_key("tenant_456", "process_refund", args1);
+        assert_ne!(key1, key3);
+
+        // Different tool produces different key
+        let key4 = generate_idempotency_key("tenant_123", "cancel_refund", args1);
+        assert_ne!(key1, key4);
+    }
+
+    #[tokio::test]
+    async fn test_fan_out_idempotency_cache_states() {
+        let operation_cache = moka::future::Cache::builder()
+            .max_capacity(10 * 1024 * 1024)
+            .build();
+
+        let state = Arc::new(AppState {
+            http_client: reqwest::Client::new(),
+            compliance_url: "http://localhost:8083".to_string(),
+            rate_limit_max: 60,
+            rate_limit_window: 60,
+            dashboard_url: "http://localhost:5173".to_string(),
+            llm_api_base_url: None,
+            redis_client: None,
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
+            billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
+            auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
+            rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
+            routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
+            semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            rate_limit_cache: Arc::new(dashmap::DashMap::new()),
+            l1_cache: Arc::new(crate::infrastructure::l1_cache::L1Cache::new(1024).unwrap()),
+            routing_state: Arc::new(crate::domain::models::RoutingState::new()),
+            circuit_breaker: moka::future::Cache::builder().build(),
+            loop_fallback_cache: moka::future::Cache::builder().build(),
+            mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::from_env(),
+            tool_registry: crate::usecases::tool_router::ToolRegistry::from_env(),
+            agent_guardian_cache: moka::future::Cache::builder().build(),
+            operation_cache: operation_cache.clone(),
+            dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+        });
+
+        let tool_call = ToolCall {
+            id: "call_123".to_string(),
+            name: "test_refund".to_string(),
+            arguments: r#"{"amount":100}"#.to_string(),
+        };
+
+        let op_key = generate_idempotency_key("tenant_test", "test_refund", r#"{"amount":100}"#);
+
+        // Scenario A: OpState::Completed returns cached result
+        operation_cache
+            .insert(
+                op_key.clone(),
+                OpState::Completed {
+                    content: r#"{"status":"refunded"}"#.to_string(),
+                    latency_ms: 120,
+                },
+            )
+            .await;
+
+        let results = fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
+        assert_eq!(results[0].content, r#"{"status":"refunded"}"#);
+        assert_eq!(results[0].latency_ms, 120);
+
+        // Scenario B: OpState::InProgress returns ALREADY_IN_FLIGHT
+        operation_cache
+            .insert(
+                op_key.clone(),
+                OpState::InProgress {
+                    lease_until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                },
+            )
+            .await;
+
+        let results_in_flight =
+            fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        assert_eq!(results_in_flight.len(), 1);
+        assert!(!results_in_flight[0].success);
+        assert_eq!(
+            results_in_flight[0].content,
+            r#"{"error":"ALREADY_IN_FLIGHT"}"#
+        );
+
+        // Scenario C: OpState::Unknown blocks auto-retry
+        operation_cache
+            .insert(op_key.clone(), OpState::Unknown)
+            .await;
+
+        let results_unknown = fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        assert_eq!(results_unknown.len(), 1);
+        assert!(!results_unknown[0].success);
+        assert_eq!(
+            results_unknown[0].content,
+            r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#
+        );
     }
 }

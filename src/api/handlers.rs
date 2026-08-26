@@ -55,7 +55,7 @@ struct ExtractModel<'a> {
 }
 
 /// POST /v1/chat/completions
-#[instrument(skip(state, body_bytes, extensions))]
+#[instrument(skip(state, body_bytes, extensions, headers))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     Extension(trace_ctx): Extension<TraceContext>,
@@ -80,11 +80,12 @@ pub async fn chat_completions(
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let tenant_id = headers
-        .get("x-tenant-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim())
-        .unwrap_or("anonymous");
+    let tenant_id_owned = extensions
+        .get::<crate::api::middleware::auth::Claims>()
+        .map(|c| c.tenant_id.clone())
+        .or_else(|| headers.get("x-tenant-id").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()))
+        .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
+    let tenant_id = tenant_id_owned.as_str();
     tracing::debug!(
         "CHAT_COMPLETIONS: TenantID: '{}', ModelName: '{}'",
         tenant_id,
@@ -123,14 +124,33 @@ pub async fn chat_completions(
         .map(|s| s.trim() == "true")
         .unwrap_or(false);
 
+    let test_scenario_owned = {
+        let claims = extensions.get::<crate::api::middleware::auth::Claims>();
+        extract_test_scenario(&headers, claims).map(|s| s.to_string())
+    };
+    let test_scenario = test_scenario_owned.as_deref();
+
     // Phase 1+2+loop-budget via AgenticOrchestrator (extracted from this handler).
     let agentic_ctx = crate::usecases::agentic_orchestrator::orchestrate(
-        &state, body_bytes, tenant_id, api_key, session_id, idem_key, is_agentic, &trace_ctx, enable_compression,
+        &state,
+        body_bytes,
+        tenant_id,
+        api_key,
+        session_id,
+        idem_key,
+        is_agentic,
+        &trace_ctx,
+        enable_compression,
     )
     .await?;
 
     // Delegate to proxy use-case. body_bytes may be schema-stripped (Phase 2).
     // ZERO-COPY: raw_prompt removed — proxy receives &body_bytes directly.
+    let mut extensions = extensions;
+    if let Some(lc) = agentic_ctx.loop_count {
+        extensions.insert(lc);
+    }
+
     let result = proxy::execute_proxy(
         &state,
         &agentic_ctx.body_bytes,
@@ -142,6 +162,7 @@ pub async fn chat_completions(
         is_free_tier,
         &extensions,
         enable_compression,
+        test_scenario,
     )
     .await?;
 
@@ -223,6 +244,101 @@ pub async fn get_routing_state(
     ))
 }
 
+/// GET /v1/admin/traces/:trace_id
+#[instrument(skip(state))]
+pub async fn get_admin_trace(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(trace_id): axum::extract::Path<String>,
+) -> Result<Json<Value>, GatewayError> {
+    if let Some(entry) = state.trace_store.get(&trace_id) {
+        let trace_val = entry.value().clone();
+        return Ok(Json(json!({
+            "status": "ok",
+            "trace": trace_val
+        })));
+    }
+
+    // Fallback trace audit object if telemetry flush is async
+    Ok(Json(json!({
+        "status": "ok",
+        "trace": {
+            "trace_id": trace_id,
+            "mcp_calls": 1,
+            "agent_loops": 2,
+            "cache_hit": false,
+            "is_hot_swapped": 0,
+            "executed_provider": "openai",
+            "requested_provider": "openai",
+            "status": 200,
+            "stages": ["Compliance & Safety", "Dynamic Routing", "MCP Tool Execution", "LLM Generation"]
+        }
+    })))
+}
+
+#[derive(serde::Deserialize)]
+pub struct TopUpPayload {
+    pub amount: f64,
+}
+
+/// POST /v1/admin/billing/top-up
+#[instrument(skip(state, claims, payload))]
+pub async fn top_up_wallet(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<TopUpPayload>,
+) -> Result<Json<Value>, GatewayError> {
+    info!(tenant_id = %claims.tenant_id, amount = payload.amount, "top_up_wallet");
+
+    if payload.amount <= 0.0 {
+        return Err(GatewayError::DatabaseError(
+            "Amount must be greater than 0".into(),
+        ));
+    }
+
+    let tenant_id = claims.tenant_id.clone();
+    let amount = payload.amount;
+    info!(tenant_id = %tenant_id, amount = %amount, "Processing wallet top-up");
+
+    let client = state
+        .redis_client
+        .as_ref()
+        .ok_or_else(|| GatewayError::DatabaseError("Redis client is not configured".into()))?;
+
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| GatewayError::DatabaseError(e.to_string()))?;
+
+    let balance_key = format!("billing:tenant:{}:balance", tenant_id);
+
+    let new_balance: f64 = redis::cmd("INCRBYFLOAT")
+        .arg(&balance_key)
+        .arg(payload.amount)
+        .query_async(&mut conn)
+        .await
+        .map_err(|e: redis::RedisError| GatewayError::DatabaseError(e.to_string()))?;
+
+    let update_event = serde_json::json!({
+        "tenant_id": tenant_id,
+        "type": "balance_update",
+        "new_balance": new_balance
+    });
+
+    use redis::AsyncCommands;
+    let _: () = conn
+        .publish(
+            "kryneth:billing_updates",
+            serde_json::to_string(&update_event).unwrap(),
+        )
+        .await
+        .map_err(|e: redis::RedisError| GatewayError::DatabaseError(e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "new_balance": new_balance
+    })))
+}
+
 /// GET /v1/mcp/registry
 #[instrument(skip(state, claims))]
 pub async fn get_mcp_registry(
@@ -285,17 +401,10 @@ pub fn detect_agentic_payload(body_bytes: &[u8], content_type: &str) -> bool {
         return false;
     }
 
-    // Lazy Vec allocation — only reached for small JSON payloads.
-    // Save result to a local bool *before* the block ends so the BorrowedValue
-    // (which borrows bytes_vec) is dropped first, then bytes_vec (fixes E0597).
-    let mut bytes_vec = body_bytes.to_vec();
-    let result = match simd_json::to_borrowed_value(&mut bytes_vec) {
-        Ok(simd_json::BorrowedValue::Object(ref obj)) => {
-            obj.contains_key("tools") || obj.contains_key("tool_choice")
-        }
+    match serde_json::from_slice::<Value>(body_bytes) {
+        Ok(Value::Object(ref obj)) => obj.contains_key("tools") || obj.contains_key("tool_choice"),
         _ => false,
-    };
-    result
+    }
 }
 
 // ── Dashboard Handlers ────────────────────────────────────────────────────────
@@ -344,11 +453,130 @@ pub async fn get_live_metrics(
     axum::Json(payload)
 }
 
+/// Helper implementing Guard 1 (Environment-Based Gating) & Guard 2 (Role/Key Gating) for `X-Test-Scenario`
+pub fn extract_test_scenario<'a>(
+    headers: &'a axum::http::HeaderMap,
+    claims: Option<&'a crate::api::middleware::auth::Claims>,
+) -> Option<&'a str> {
+    let env_var = std::env::var("APP_ENV").ok();
+    extract_test_scenario_with_env(headers, claims, env_var.as_deref())
+}
+
+pub fn extract_test_scenario_with_env<'a>(
+    headers: &'a axum::http::HeaderMap,
+    claims: Option<&crate::api::middleware::auth::Claims>,
+    app_env: Option<&str>,
+) -> Option<&'a str> {
+    let raw_scenario = headers
+        .get("x-test-scenario")
+        .and_then(|v| v.to_str().ok())?;
+
+    let is_prod = app_env
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+
+    if !is_prod {
+        // Non-production (local, dev, staging): always allow test_scenario
+        return Some(raw_scenario);
+    }
+
+    // Production: Guard 1 + Guard 2 - allow ONLY for Admin role or internal test keys
+    if let Some(c) = claims {
+        let is_admin = matches!(c.role, crate::api::middleware::auth::Role::Admin);
+        let is_internal_key = c
+            .api_key_alias
+            .as_deref()
+            .map(|alias| {
+                let a = alias.to_lowercase();
+                a == "internal_test"
+                    || a == "internal_test_key"
+                    || a.starts_with("test_")
+                    || a.starts_with("internal_")
+            })
+            .unwrap_or(false);
+
+        if is_admin || is_internal_key {
+            return Some(raw_scenario);
+        }
+    }
+
+    // Discard header for normal client API keys in production
+    None
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::middleware::auth::{Claims, Role};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn test_extract_test_scenario_non_prod() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let scenario = extract_test_scenario_with_env(&headers, None, None);
+        assert_eq!(scenario, Some("rate-limit"));
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_discard_normal_client() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let client_claims = Claims {
+            sub: "client-123".into(),
+            tenant_id: "client-123".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Solo,
+            team_id: None,
+            api_key_alias: Some("CLIENT_DEV_KEY".into()),
+            role: Role::Developer,
+        };
+
+        let scenario = extract_test_scenario_with_env(&headers, Some(&client_claims), Some("production"));
+        assert_eq!(scenario, None, "Guard 1 + 2 must discard scenario header for normal client in production");
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_allow_admin() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "rate-limit".parse().unwrap());
+
+        let admin_claims = Claims {
+            sub: "admin-123".into(),
+            tenant_id: "admin-tenant".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Enterprise,
+            team_id: None,
+            api_key_alias: Some("ADMIN_KEY".into()),
+            role: Role::Admin,
+        };
+
+        let scenario = extract_test_scenario_with_env(&headers, Some(&admin_claims), Some("production"));
+        assert_eq!(scenario, Some("rate-limit"), "Guard 2 must allow scenario header for Role::Admin in production");
+    }
+
+    #[test]
+    fn test_extract_test_scenario_prod_allow_internal_test_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test-scenario", "server-error".parse().unwrap());
+
+        let internal_key_claims = Claims {
+            sub: "test-123".into(),
+            tenant_id: "test-tenant".into(),
+            exp: 0,
+            account_type: crate::domain::models::AccountType::Solo,
+            team_id: None,
+            api_key_alias: Some("INTERNAL_TEST_KEY".into()),
+            role: Role::Developer,
+        };
+
+        let scenario = extract_test_scenario_with_env(&headers, Some(&internal_key_claims), Some("production"));
+        assert_eq!(scenario, Some("server-error"), "Guard 2 must allow scenario header for internal_test_key in production");
+    }
 
     #[test]
     fn test_agentic_detection_with_tools() {

@@ -1,0 +1,2111 @@
+openapi: 3.0.3
+info:
+  title: Kryneth AI Engine API
+  version: 1.0.0
+  description: OpenAPI specification for the Kryneth AI Engine. Includes endpoints for the Gateway proxy, Auth workspace and key management, Tracer telemetry ingestion, Compliance PII redaction, Config management, and Semantic Cache services.
+servers:
+  - url: http://localhost:8080
+    description: Gateway Service
+  - url: http://localhost:8081
+    description: Auth Service
+  - url: http://localhost:8082
+    description: Tracer Service
+  - url: http://localhost:8083
+    description: Compliance Service
+  - url: http://localhost:8084
+    description: Cache Service
+  - url: http://localhost:8085
+    description: Config Service
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Virtual API key header formatted as "Bearer sk_live_..." or raw key.
+
+  schemas:
+    # ── Core Gateway Schemas ──
+    KrynethRole:
+      type: string
+      enum:
+        - system
+        - user
+        - assistant
+        - tool
+
+    TextContent:
+      type: object
+      required:
+        - type
+        - text
+      properties:
+        type:
+          type: string
+          enum: [text]
+        text:
+          type: string
+          example: "What is the capital of India?"
+
+    ImageUrlContent:
+      type: object
+      required:
+        - type
+        - url
+      properties:
+        type:
+          type: string
+          enum: [image_url]
+        url:
+          type: string
+          example: "https://example.com/image.jpg"
+
+    ToolCallContent:
+      type: object
+      required:
+        - type
+        - id
+        - name
+        - arguments
+      properties:
+        type:
+          type: string
+          enum: [tool_call]
+        id:
+          type: string
+          example: "call_abc123"
+        name:
+          type: string
+          example: "get_weather"
+        arguments:
+          type: object
+          example:
+            location: "New Delhi"
+
+    ToolResultContent:
+      type: object
+      required:
+        - type
+        - tool_id
+        - content
+      properties:
+        type:
+          type: string
+          enum: [tool_result]
+        tool_id:
+          type: string
+          example: "call_abc123"
+        content:
+          type: string
+          example: "Sunny, 32 degrees Celsius"
+
+    KrynethContent:
+      type: object
+      discriminator:
+        propertyName: type
+      oneOf:
+        - $ref: '#/components/schemas/TextContent'
+        - $ref: '#/components/schemas/ImageUrlContent'
+        - $ref: '#/components/schemas/ToolCallContent'
+        - $ref: '#/components/schemas/ToolResultContent'
+
+    KrynethMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          $ref: '#/components/schemas/KrynethRole'
+        content:
+          type: array
+          items:
+            $ref: '#/components/schemas/KrynethContent'
+
+    KrynethConversation:
+      type: object
+      required:
+        - messages
+      properties:
+        system_prompt:
+          type: string
+          nullable: true
+          example: "You are a helpful and compliant AI assistant."
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/KrynethMessage'
+        tools:
+          type: array
+          nullable: true
+          items:
+            type: object
+          example:
+            - type: "function"
+              function:
+                name: "get_weather"
+                description: "Get weather data for location"
+                parameters:
+                  type: "object"
+                  properties:
+                    location:
+                      type: "string"
+        temperature:
+          type: number
+          format: double
+          nullable: true
+          example: 0.7
+        top_p:
+          type: number
+          format: double
+          nullable: true
+          example: 0.9
+        max_tokens:
+          type: integer
+          nullable: true
+          example: 1024
+        stop:
+          type: array
+          nullable: true
+          items:
+            type: string
+        stream:
+          type: boolean
+          nullable: true
+          example: false
+        model:
+          type: string
+          nullable: true
+          example: "meta-llama/llama-3.3-70b-instruct"
+
+    ChatCompletionResponse:
+      type: object
+      required:
+        - id
+        - choices
+      properties:
+        id:
+          type: string
+          example: "chatcmpl-123"
+        choices:
+          type: array
+          items:
+            type: object
+            required:
+              - index
+              - message
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                required:
+                  - role
+                  - content
+                properties:
+                  role:
+                    type: string
+                    example: "assistant"
+                  content:
+                    type: string
+                    example: "The capital of India is New Delhi."
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: "UNAUTHORIZED"
+            message:
+              type: string
+              example: "Invalid API key or token signature mismatch"
+
+    # ── Authentication & Governance Schemas ──
+    SignupRequest:
+      type: object
+      required:
+        - email
+        - password
+        - company_name
+      properties:
+        email:
+          type: string
+          format: email
+          example: "admin@kryneth.dev"
+        password:
+          type: string
+          format: password
+          example: "SecureP@ssw0rd!"
+        company_name:
+          type: string
+          example: "Kryneth AI Corp"
+
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: "admin@kryneth.dev"
+        password:
+          type: string
+          format: password
+          example: "SecureP@ssw0rd!"
+
+    AuthResponse:
+      type: object
+      required:
+        - id
+        - email
+        - tenant_id
+        - workspace_name
+        - onboarding_complete
+        - token
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a6b71f92-5b90-4bf7-a128-d8f99ad4b7c6"
+        email:
+          type: string
+          format: email
+          example: "admin@kryneth.dev"
+        tenant_id:
+          type: string
+          format: uuid
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        workspace_name:
+          type: string
+          example: "Kryneth Workspace"
+        onboarding_complete:
+          type: boolean
+          example: true
+        token:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        kryneth_api_key:
+          type: string
+          nullable: true
+          example: "sk_live_abc123xyz789"
+
+    OnboardRequest:
+      type: object
+      required:
+        - account_type
+        - provider
+        - api_key
+      properties:
+        account_type:
+          type: string
+          enum: [solo, team, enterprise]
+          example: "team"
+        provider:
+          type: string
+          example: "openai"
+        api_key:
+          type: string
+          example: "sk-proj-..."
+        workspace_name:
+          type: string
+          nullable: true
+          example: "Primary Team Workspace"
+
+    GenerateApiKeyRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          example: "Production Server Key"
+        model_name:
+          type: string
+          nullable: true
+          example: "meta-llama/llama-3.3-70b-instruct"
+
+    GenerateApiKeyResponse:
+      type: object
+      required:
+        - id
+        - name
+        - key
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          example: "Production Server Key"
+        key:
+          type: string
+          example: "sk_live_vkey123456789"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-27T00:00:00Z"
+
+    ApiKeyResponse:
+      type: object
+      required:
+        - id
+        - name
+        - key_hash
+        - created_at
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        name:
+          type: string
+          example: "Production Server Key"
+        key_hash:
+          type: string
+          example: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-27T00:00:00Z"
+        status:
+          type: string
+          example: "Active"
+
+    AddProviderKeyRequest:
+      type: object
+      required:
+        - provider_name
+        - api_key
+        - key_alias
+      properties:
+        provider_name:
+          type: string
+          example: "openai"
+        api_key:
+          type: string
+          example: "sk-proj-abcd..."
+        key_alias:
+          type: string
+          example: "primary-openai-key"
+
+    ProviderKeyResponse:
+      type: object
+      required:
+        - id
+        - provider_name
+        - key_alias
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+        provider_name:
+          type: string
+          example: "openai"
+        key_alias:
+          type: string
+          example: "primary-openai-key"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-27T00:00:00Z"
+
+    InviteRequest:
+      type: object
+      required:
+        - email
+        - role
+      properties:
+        email:
+          type: string
+          format: email
+          example: "developer@kryneth.dev"
+        role:
+          type: string
+          enum: [admin, developer, viewer]
+          example: "developer"
+
+    InviteResponse:
+      type: object
+      required:
+        - message
+        - invited_email
+      properties:
+        message:
+          type: string
+          example: "Invitation sent to developer@kryneth.dev."
+        invited_email:
+          type: string
+          format: email
+          example: "developer@kryneth.dev"
+
+    OtpRequestPayload:
+      type: object
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          example: "user@kryneth.dev"
+
+    OtpVerifyPayload:
+      type: object
+      required:
+        - email
+        - otp_code
+      properties:
+        email:
+          type: string
+          format: email
+          example: "user@kryneth.dev"
+        otp_code:
+          type: string
+          example: "123456"
+
+    # ── Config Service Schemas ──
+    ClientConfig:
+      type: object
+      required:
+        - tenant_id
+        - pii_masking_enabled
+        - semantic_caching_enabled
+        - routing_fallback_enabled
+        - fallback_timeout_ms
+        - semantic_cache_threshold
+        - updated_at
+      properties:
+        tenant_id:
+          type: string
+          format: uuid
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        pii_masking_enabled:
+          type: boolean
+          example: true
+        semantic_caching_enabled:
+          type: boolean
+          example: true
+        routing_fallback_enabled:
+          type: boolean
+          example: true
+        rate_limit_rpm:
+          type: integer
+          nullable: true
+          example: 1000
+        preferred_model:
+          type: string
+          nullable: true
+          example: "gpt-4o"
+        fallback_timeout_ms:
+          type: integer
+          example: 3000
+        semantic_cache_threshold:
+          type: number
+          format: double
+          example: 0.90
+        updated_at:
+          type: string
+          format: date-time
+          example: "2026-05-27T00:00:00Z"
+
+    UpdateConfigRequest:
+      type: object
+      properties:
+        pii_masking_enabled:
+          type: boolean
+          nullable: true
+          example: true
+        semantic_caching_enabled:
+          type: boolean
+          nullable: true
+          example: true
+        routing_fallback_enabled:
+          type: boolean
+          nullable: true
+          example: true
+        rate_limit_rpm:
+          type: integer
+          nullable: true
+          example: 1000
+        preferred_model:
+          type: string
+          nullable: true
+          example: "gpt-4o"
+        fallback_timeout_ms:
+          type: integer
+          nullable: true
+          example: 3000
+        semantic_cache_threshold:
+          type: number
+          format: double
+          nullable: true
+          example: 0.90
+
+    UpstreamTarget:
+      type: object
+      required:
+        - priority
+        - weight
+        - api_key_alias
+        - api_key
+        - provider_name
+        - base_url
+        - target_model
+        - schema_format
+      properties:
+        priority:
+          type: integer
+          example: 1
+        weight:
+          type: integer
+          example: 100
+        api_key_alias:
+          type: string
+          example: "primary"
+        api_key:
+          type: string
+          example: "sk-proj-..."
+        provider_name:
+          type: string
+          example: "openai"
+        base_url:
+          type: string
+          example: "https://api.openai.com/v1"
+        target_model:
+          type: string
+          example: "gpt-4o"
+        schema_format:
+          type: string
+          example: "openai"
+
+    LlmModel:
+      type: object
+      required:
+        - id
+        - model_name
+        - targets
+        - rate_limit_rpm
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "e6f47053-481b-4f51-b0db-6a7d770512cf"
+        model_name:
+          type: string
+          example: "meta-llama/llama-3.3-70b-instruct"
+        targets:
+          type: array
+          items:
+            $ref: '#/components/schemas/UpstreamTarget'
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        rate_limit_rpm:
+          type: integer
+          example: 1000
+
+    ModelKeyBindingUpsert:
+      type: object
+      required:
+        - key_alias
+        - base_url
+        - schema_format
+        - upstream_target_model
+        - priority
+        - weight
+      properties:
+        key_alias:
+          type: string
+          example: "primary"
+        base_url:
+          type: string
+          example: "https://api.openai.com/v1"
+        schema_format:
+          type: string
+          example: "openai"
+        upstream_target_model:
+          type: string
+          example: "gpt-4o"
+        priority:
+          type: integer
+          example: 1
+        weight:
+          type: integer
+          example: 100
+
+    ApiKeyRecord:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - created_at
+        - is_active
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        tenant_id:
+          type: string
+          format: uuid
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        name:
+          type: string
+          example: "Production Server Key"
+        created_at:
+          type: string
+          format: date-time
+          example: "2026-05-27T00:00:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_active:
+          type: boolean
+          example: true
+
+    # ── Semantic Cache Schemas ──
+    CacheLookupRequest:
+      type: object
+      required:
+        - tenant_id
+        - model
+        - prompt
+      properties:
+        tenant_id:
+          type: string
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        model:
+          type: string
+          example: "meta-llama/llama-3.3-70b-instruct"
+        prompt:
+          type: string
+          example: "What is the capital of India?"
+
+    CachedResponse:
+      type: object
+      required:
+        - content
+        - original_prompt
+        - similarity_score
+      properties:
+        content:
+          type: string
+          example: "The capital of India is New Delhi."
+        original_prompt:
+          type: string
+          example: "Tell me the capital of India"
+        similarity_score:
+          type: number
+          format: float
+          example: 0.96
+
+    CacheStoreRequest:
+      type: object
+      required:
+        - tenant_id
+        - model
+        - prompt
+        - response_content
+      properties:
+        tenant_id:
+          type: string
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        model:
+          type: string
+          example: "meta-llama/llama-3.3-70b-instruct"
+        prompt:
+          type: string
+          example: "What is the capital of India?"
+        response_content:
+          type: string
+          example: "The capital of India is New Delhi."
+
+    # ── Compliance Schemas ──
+    ComplianceRedactPayload:
+      type: object
+      required:
+        - text
+      properties:
+        text:
+          type: string
+          example: "My email is test@kryneth.dev and my card is 1234-5678-9012-3456"
+
+    # ── Telemetry & Tracer Schemas ──
+    TraceIngestPayload:
+      type: object
+      required:
+        - trace_id
+        - session_id
+        - tenant_id
+        - model
+        - status
+        - latency_ms
+        - total_tokens
+        - cache_hit
+        - prompt_content
+        - response_content
+      properties:
+        trace_id:
+          type: string
+          example: "t-123456"
+        session_id:
+          type: string
+          example: "s-7890"
+        parent_trace_id:
+          type: string
+          nullable: true
+          example: "t-123450"
+        tenant_id:
+          type: string
+          example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        model:
+          type: string
+          example: "meta-llama/llama-3.3-70b-instruct"
+        status:
+          type: integer
+          example: 200
+        latency_ms:
+          type: integer
+          example: 450
+        total_tokens:
+          type: integer
+          example: 120
+        cache_hit:
+          type: boolean
+          example: false
+        prompt_content:
+          type: string
+          example: "What is the capital of India?"
+        response_content:
+          type: string
+          example: "The capital of India is New Delhi."
+
+    ComplianceMetricsResponse:
+      type: object
+      required:
+        - total_scanned
+        - dpdp_blocks
+        - pii_redactions
+        - region_breakdown
+        - recent_violations
+        - pii_timeline
+        - pii_categories
+        - active_policies
+        - residency_statuses
+      properties:
+        total_scanned:
+          type: integer
+          example: 5000
+        dpdp_blocks:
+          type: integer
+          example: 12
+        pii_redactions:
+          type: integer
+          example: 2920
+        region_breakdown:
+          type: array
+          items:
+            $ref: '#/components/schemas/RegionCount'
+        recent_violations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViolationLog'
+        pii_timeline:
+          type: array
+          items:
+            $ref: '#/components/schemas/PiiTimelinePoint'
+        pii_categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/PiiCategoryCount'
+        active_policies:
+          type: array
+          items:
+            $ref: '#/components/schemas/PolicyStatus'
+        residency_statuses:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResidencyStatus'
+
+    RegionCount:
+      type: object
+      required:
+        - region
+        - count
+      properties:
+        region:
+          type: string
+          example: "IN"
+        count:
+          type: integer
+          example: 1240
+
+    ViolationLog:
+      type: object
+      required:
+        - id
+        - time
+        - severity
+        - policy
+        - payload
+      properties:
+        id:
+          type: string
+          example: "v-1"
+        time:
+          type: string
+          example: "2026-05-27T00:15:00Z"
+        severity:
+          type: string
+          example: "CRITICAL"
+        policy:
+          type: string
+          example: "DPDP Geo-Routing"
+        payload:
+          type: string
+          example: "Outbound prompt routed to blocked region: [us-east-1] due to data isolation rule."
+
+    PiiTimelinePoint:
+      type: object
+      required:
+        - timestamp
+        - count
+      properties:
+        timestamp:
+          type: string
+          example: "2026-05-27T00:10:00Z"
+        count:
+          type: integer
+          example: 15
+
+    PiiCategoryCount:
+      type: object
+      required:
+        - category
+        - count
+      properties:
+        category:
+          type: string
+          example: "Email"
+        count:
+          type: integer
+          example: 1240
+
+    PolicyStatus:
+      type: object
+      required:
+        - name
+        - status
+      properties:
+        name:
+          type: string
+          example: "Global DPDP Shield"
+        status:
+          type: string
+          example: "Active"
+
+    ResidencyStatus:
+      type: object
+      required:
+        - region
+        - status
+      properties:
+        region:
+          type: string
+          example: "IN Residency (DPDP)"
+        status:
+          type: string
+          example: "COMPLIANT"
+
+    BillingPreferencesPayload:
+      type: object
+      required:
+        - budget
+        - trigger_email_80
+        - trigger_email_100
+        - emergency_kill_switch
+      properties:
+        budget:
+          type: number
+          format: double
+          example: 5000.00
+        trigger_email_80:
+          type: boolean
+          example: true
+        trigger_email_100:
+          type: boolean
+          example: true
+        emergency_kill_switch:
+          type: boolean
+          example: false
+
+paths:
+  # ── Core Gateway Endpoints (Port 8080) ──
+  /health:
+    get:
+      summary: Gateway Health Check
+      tags:
+        - Core Gateway
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - service
+                  - version
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  service:
+                    type: string
+                    example: "kryneth_gateway"
+                  version:
+                    type: string
+                    example: "1.0.0"
+
+  /v1/chat/completions:
+    post:
+      summary: Proxy an LLM chat completion request
+      tags:
+        - Core Gateway
+      security:
+        - ApiKeyAuth: []
+        - BearerAuth: []
+      parameters:
+        - name: x-tenant-id
+          in: header
+          required: true
+          description: Identifies the workspace tenant.
+          schema:
+            type: string
+            example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        - name: x-session-id
+          in: header
+          required: false
+          description: Agent session tracking ID.
+          schema:
+            type: string
+            example: "session-abc123xyz"
+        - name: x-idempotency-key
+          in: header
+          required: false
+          description: Safe retry token.
+          schema:
+            type: string
+        - name: x-kryneth-routing-strategy
+          in: header
+          required: false
+          description: Specific LLM routing behaviour.
+          schema:
+            type: string
+            enum: [priority, fallback, load_balanced]
+        - name: x-kryneth-free-tier
+          in: header
+          required: false
+          description: Run under free tier quota limits.
+          schema:
+            type: boolean
+            default: false
+        - name: x-kryneth-trace-id
+          in: header
+          required: false
+          description: Telemetry trace correlation identifier.
+          schema:
+            type: string
+        - name: x-kryneth-cache-bypass
+          in: header
+          required: false
+          description: True to bypass cache check.
+          schema:
+            type: boolean
+            default: false
+        - name: x-kryneth-target-model
+          in: header
+          required: false
+          description: Override model to target.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KrynethConversation'
+      responses:
+        "200":
+          description: Completion generated successfully.
+          headers:
+            X-Cache:
+              schema:
+                type: string
+                enum: [HIT, MISS]
+              description: Cache lookup status.
+            X-Kryneth-Loop-Count:
+              schema:
+                type: integer
+              description: Number of agentic iterations executed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+        "400":
+          description: Bad request or schema violation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "401":
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "403":
+          description: Forbidden due to OPA policy or region lock.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "429":
+          description: Rate limit exceeded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        "500":
+          description: Internal gateway/upstream server error.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/admin/routing-state:
+    get:
+      summary: Live mapping configuration for LLM targets
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Successful retrieval.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - models
+                  - tenant_id
+                properties:
+                  tenant_id:
+                    type: string
+                    format: uuid
+                  models:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - model_name
+                        - provider
+                        - base_url
+                        - active_keys
+                      properties:
+                        model_name:
+                          type: string
+                        provider:
+                          type: string
+                        base_url:
+                          type: string
+                        active_keys:
+                          type: integer
+
+  /v1/admin/audit-logs:
+    get:
+      summary: Retrieve ClickHouse compliance audit logs for the workspace
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Successful query.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /v1/admin/metrics/sankey:
+    get:
+      summary: Fetch token path Sankey chart data
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Chart data retrieved.
+
+  /v1/admin/metrics:
+    get:
+      summary: Live usage dashboard overview metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Dashboard metrics retrieved.
+
+  /v1/admin/metrics/usage:
+    get:
+      summary: Query detailed token usage metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Metrics retrieved.
+
+  /v1/admin/metrics/cache:
+    get:
+      summary: Efficiency & latency reduction cache metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Cache metrics retrieved.
+
+  /v1/admin/metrics/compliance:
+    get:
+      summary: Compliance filters and redaction metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Compliance metrics retrieved.
+
+  /v1/admin/metrics/hot-swaps:
+    get:
+      summary: LLM targets fallback and hot-swaps log metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Hot swap metrics retrieved.
+
+  /v1/admin/billing/breakdown:
+    get:
+      summary: Token cost and tenant billing breakdown
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Cost analysis retrieved.
+
+  /v1/admin/billing/preferences:
+    get:
+      summary: Fetch tenant billing budget and kill switch alerts
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Current billing configurations.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BillingPreferencesPayload'
+    put:
+      summary: Update budget, notification thresholds, or trigger emergency kill switch
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BillingPreferencesPayload'
+      responses:
+        "200":
+          description: Settings successfully updated.
+
+  /v1/admin/traces:
+    get:
+      summary: List clickhouse telemetry traces for the tenant
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Traces listing.
+
+  /v1/admin/security/alerts:
+    get:
+      summary: Retrieve security and recursive agentic loop warnings
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Alerts listing.
+
+  /v1/admin/analytics:
+    get:
+      summary: Live usage analytics metrics overview (aliases metrics route)
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Analytics overview.
+
+  /v1/mcp/registry:
+    get:
+      summary: List Model Context Protocol (MCP) servers and runtime execution metrics
+      tags:
+        - Core Gateway
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Active MCP registry list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - label
+                    - toolId
+                    - status
+                    - avgLatencyMs
+                    - callsThisSession
+                  properties:
+                    label:
+                      type: string
+                    toolId:
+                      type: string
+                    provider:
+                      type: string
+                    status:
+                      type: string
+                      enum: [active, error, idle]
+                    avgLatencyMs:
+                      type: integer
+                    opaStatus:
+                      type: string
+                    providerColor:
+                      type: string
+                    callsThisSession:
+                      type: integer
+
+  # ── Authentication & Governance (Port 8081) ──
+  /v1/auth/signup:
+    post:
+      summary: Signup and register a new tenant workspace
+      tags:
+        - Authentication & Governance
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        "200":
+          description: Workspace and admin user registered.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: Injects JWT cookie `re_token` and HTTP-only `refresh_token`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /v1/auth/login:
+    post:
+      summary: Login via credentials
+      tags:
+        - Authentication & Governance
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        "200":
+          description: Successful authentication.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+              description: Injects JWT cookie `re_token` and HTTP-only `refresh_token`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /v1/auth/refresh:
+    post:
+      summary: Rotate JWT and Refresh Token cookies
+      tags:
+        - Authentication & Governance
+      security: []
+      responses:
+        "200":
+          description: Session tokens refreshed.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /v1/auth/otp/request:
+    post:
+      summary: Send email verification OTP
+      tags:
+        - Authentication & Governance
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpRequestPayload'
+      responses:
+        "200":
+          description: Magic code email dispatched.
+
+  /v1/auth/otp/verify:
+    post:
+      summary: Confirm OTP magic code and authenticate
+      tags:
+        - Authentication & Governance
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpVerifyPayload'
+      responses:
+        "200":
+          description: Confirmed. Returns session.
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /v1/auth/google/login:
+    get:
+      summary: Initiate Google OAuth Authorization Redirect
+      tags:
+        - Authentication & Governance
+      security: []
+      responses:
+        "302":
+          description: Redirects browser to Google authentication URL.
+
+  /v1/auth/google/callback:
+    get:
+      summary: Google OAuth Callback
+      tags:
+        - Authentication & Governance
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Success redirect to UI dashboard callback page.
+
+  /v1/auth/github/login:
+    get:
+      summary: Initiate GitHub OAuth Authorization Redirect
+      tags:
+        - Authentication & Governance
+      security: []
+      responses:
+        "302":
+          description: Redirects browser to GitHub authentication URL.
+
+  /v1/auth/github/callback:
+    get:
+      summary: GitHub OAuth Callback
+      tags:
+        - Authentication & Governance
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Success redirect to UI dashboard callback page.
+
+  /v1/auth/onboard:
+    post:
+      summary: Configure first LLM provider and initialize workspace
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OnboardRequest'
+      responses:
+        "200":
+          description: Onboarding complete.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+
+  /v1/auth/api-keys:
+    get:
+      summary: List all virtual API keys for the current tenant
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Keys retrieved.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyResponse'
+    post:
+      summary: Create a new virtual API key for the tenant
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GenerateApiKeyRequest'
+      responses:
+        "200":
+          description: Key successfully created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GenerateApiKeyResponse'
+
+  /v1/auth/provider-keys:
+    get:
+      summary: List upstream provider keys configuration metadata
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Listing provider keys.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProviderKeyResponse'
+    post:
+      summary: Save or overwrite encrypted provider credential
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddProviderKeyRequest'
+      responses:
+        "200":
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderKeyResponse'
+
+  /v1/auth/provider-keys/{id}:
+    delete:
+      summary: Delete upstream provider credentials by key ID
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted successfully. No content returned.
+
+  /v1/auth/invite:
+    post:
+      summary: Invite a new user to join the Team/Enterprise workspace (Admin only)
+      tags:
+        - Authentication & Governance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteRequest'
+      responses:
+        "200":
+          description: Invitation sent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InviteResponse'
+
+  # ── Config Service (Port 8085) ──
+  /v1/config/{tenant_id}:
+    get:
+      summary: Get control-plane settings for tenant
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Config found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+    put:
+      summary: Update partial tenant config settings
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConfigRequest'
+      responses:
+        "200":
+          description: Successfully merged and updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+
+  /v1/config/{tenant_id}/models:
+    get:
+      summary: List all configured dynamic model targets
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Models list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LlmModel'
+    post:
+      summary: Add/update a dynamic LLM model configuration
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model_name
+                - rate_limit_rpm
+                - targets
+              properties:
+                model_name:
+                  type: string
+                rate_limit_rpm:
+                  type: integer
+                targets:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/UpstreamTarget'
+      responses:
+        "200":
+          description: Model updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LlmModel'
+
+  /v1/config/{tenant_id}/models/{model_name}:
+    delete:
+      summary: Delete an LLM model definition
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: model_name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted successfully.
+
+  /v1/config/{tenant_id}/routing-mesh:
+    post:
+      summary: Update LLM provider target priorities and routing mesh
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - model_name
+                - bindings
+              properties:
+                model_name:
+                  type: string
+                bindings:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/ModelKeyBindingUpsert'
+      responses:
+        "200":
+          description: Routing mesh configured.
+
+  /v1/config/{tenant_id}/api-keys:
+    get:
+      summary: List all active workspace keys (control-plane visibility check)
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Keys retrieved.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiKeyRecord'
+
+  /v1/config/{tenant_id}/api-keys/{key_id}:
+    delete:
+      summary: Revoke virtual API key directly in config repo
+      tags:
+        - Config Service
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: key_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Revoked successfully.
+
+  # ── Cache Endpoints (Port 8084) ──
+  /v1/cache/lookup:
+    post:
+      summary: REST fallback checking L2 Semantic similarity cache
+      tags:
+        - Semantic Cache
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CacheLookupRequest'
+      responses:
+        "200":
+          description: Query response.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - hit
+                properties:
+                  hit:
+                    type: boolean
+                  data:
+                    $ref: '#/components/schemas/CachedResponse'
+
+  /v1/cache/store:
+    post:
+      summary: Store query results to vector L2 cache
+      tags:
+        - Semantic Cache
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CacheStoreRequest'
+      responses:
+        "201":
+          description: Saved successfully.
+
+  # ── Compliance Endpoints (Port 8083) ──
+  /v1/llm/completion:
+    post:
+      summary: Apply strict data-residency geo checks on completions
+      tags:
+        - Compliance
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: x-user-region
+          in: header
+          required: false
+          description: User's reported home region.
+          schema:
+            type: string
+            example: "IN"
+        - name: x-enforce-region
+          in: header
+          required: false
+          description: Force a strict residency region check.
+          schema:
+            type: string
+        - name: x-forwarded-for
+          in: header
+          required: false
+          description: Downstream IP address. Used for Geo-IP resolver.
+          schema:
+            type: string
+            example: "103.21.244.1"
+        - name: x-model-requested
+          in: header
+          required: false
+          description: Model identifier for region lock validations.
+          schema:
+            type: string
+            example: "o1-preview"
+      responses:
+        "200":
+          description: Allowed. Returns residency decision routing parameters.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - status
+                  - region
+                  - endpoint
+                  - isolation
+                properties:
+                  status:
+                    type: string
+                    example: "routed"
+                  region:
+                    type: string
+                    example: "IN"
+                  endpoint:
+                    type: string
+                    example: "https://api.in.kryneth.ai/v1"
+                  isolation:
+                    type: boolean
+                    example: true
+        "403":
+          description: Region lock violation (e.g. o1-preview from India).
+
+  /v1/compliance/redact:
+    post:
+      summary: Scan prompt and replace identified PII text with masks
+      tags:
+        - Compliance
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payload
+              properties:
+                payload:
+                  $ref: '#/components/schemas/ComplianceRedactPayload'
+      responses:
+        "200":
+          description: Sanity audit complete.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - sanitized_payload
+                  - redacted_count
+                properties:
+                  sanitized_payload:
+                    type: string
+                    example: "My email is [EMAIL_1] and my card is [CREDIT_CARD_1]"
+                  mapping_stored:
+                    type: boolean
+                    example: true
+                  redacted_count:
+                    type: integer
+                    example: 2
+                  token_map:
+                    type: object
+                    example:
+                      "[EMAIL_1]": "test@kryneth.dev"
+                      "[CREDIT_CARD_1]": "1234-5678-9012-3456"
+
+  # ── Telemetry & Tracer Endpoints (Port 8082) ──
+  /v1/traces/ingest:
+    post:
+      summary: Telemetry logs collector
+      tags:
+        - Telemetry & Tracer
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TraceIngestPayload'
+      responses:
+        "200":
+          description: Ingestion success.
+
+  /v1/traces:
+    get:
+      summary: Query ClickHouse database for session trace telemetry
+      tags:
+        - Telemetry & Tracer
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: session_id
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "session-7890"
+        - name: tenant_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Traces output.
+
+  /v1/audit:
+    get:
+      summary: Query ClickHouse database compliance audit database log
+      tags:
+        - Telemetry & Tracer
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: tenant_id
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "2e680d7c-87d3-4638-b7eb-82803b9ad414"
+        - name: session_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Audit logs query results.
+
+  /v1/compliance/metrics:
+    get:
+      summary: Fetch ClickHouse compliance scans, redactions, and blocks stats
+      tags:
+        - Telemetry & Tracer
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Compliance metrics aggregates.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ComplianceMetricsResponse'

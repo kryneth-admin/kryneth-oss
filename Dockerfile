@@ -2,7 +2,7 @@
 # Stage 1: Builder
 # ------------------------------------------------------------------------------
 # Use the official Rust image as the build environment.
-FROM rust:1.77-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 
 # Set the working directory inside the container.
 WORKDIR /usr/src/kryneth_gateway
@@ -16,17 +16,18 @@ RUN apt-get update && \
 # This prevents re-downloading crates if only the source code changes.
 COPY Cargo.toml Cargo.lock ./
 
-# Create a dummy main file to build the dependencies.
+# Create dummy source files to build the dependencies.
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
+    touch src/lib.rs && \
     cargo build --release
 
 # Now, copy the actual source code.
 COPY src ./src
 
-# The previous dummy build created a cached artifact for main.rs.
-# We must touch the real main.rs to ensure Cargo recompiles it.
-RUN touch src/main.rs
+# The previous dummy build created cached artifacts for main.rs and lib.rs.
+# We must touch the real files to ensure Cargo recompiles them.
+RUN touch src/lib.rs src/main.rs
 
 # Build the final release binary using only OSS features.
 RUN cargo build --release

@@ -1,29 +1,121 @@
-# Kryneth: The Production Reliability & Governance Engine for Autonomous Agents
+# Kryneth: The Production Reliability Layer for AI Agents
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/kryneth-admin/kryneth-oss)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.77%2B-orange.svg)](https://www.rust-lang.org/)
 [![Docker](https://img.shields.io/badge/Docker-supported-blue.svg)](https://www.docker.com/)
+[![Discord](https://img.shields.io/discord/1234567890?color=5865F2&logo=discord&logoColor=white&label=Discord)](https://discord.gg/uurgj9fMy8)
+[![Rust CI](https://github.com/kryneth-admin/kryneth-oss/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/kryneth-admin/kryneth-oss/actions/workflows/rust-ci.yml)
 
-> **The Production Reliability & Governance Engine for Autonomous Agents.** An ultra-low latency, memory-safe zero-copy Rust firewall and router built on Axum and bumpalo.
+> **Agents don't fail loudly. They fail silently, burn money, and nobody notices until production breaks.**
+>
+> Kryneth is the runtime control plane that stops runaway loops, unsafe tool execution, and uncontrolled AI spend before they hit production. 
+> Built for LangGraph, CrewAI, AutoGen, Claude Code, OpenAI Agents SDK, and MCP workflows.
+
+<div align="center">
+  <img src="./docs/quickstart_demo.gif" alt="Kryneth Gateway Zero-to-Hero Setup" width="100%">
+</div>
+
+## ⚡ Zero-to-Hero Quick Start
+
+Drop Kryneth into your infrastructure in under 60 seconds.
+
+```bash
+# 1. Boot the gateway
+docker run -d -p 8080:8080 crossroot/kryneth-gateway:latest
+
+# 2. Point your existing OpenAI SDK to localhost
+export OPENAI_BASE_URL="http://localhost:8080/v1"
+```
 
 ---
 
-## 🎯 The Agentic Reality (Pain vs. Solution)
+## 🚫 Why a Runtime Control Plane?
 
-Modern API gateways built for deterministic web apps fail under the recursive, non-deterministic behaviors of autonomous AI agents. Kryneth is built specifically to address the core architectural vulnerabilities of the agentic era:
+Existing LLM API gateways solve yesterday's problems (Routing, API Keys, Rate Limits). Traditional gateways manage *requests*. Kryneth manages *agent behavior*.
 
-| Developer Pain Point | Kryneth Edge Solution | Core Mechanism |
-| :--- | :--- | :--- |
-| **Runaway Token Loops**<br>Agents get stuck in recursive retry loops, executing the same tool with identical parameters and burning thousands of dollars overnight. | **Agent Guardian Loop Trap**<br>Traps repetitive tool-call signatures at the edge in **<2ms** (`behavior_guard.rs`)—before the request hits your wallet. | Sliding window non-cryptographic `ahash` signature comparison & SIMD-accelerated JSON payload extraction. |
-| **The MCP Tax**<br>Sending full JSON schemas for 20+ tools on every turn consumes massive token budgets before reasoning even begins. | **Lazy Schema Injection**<br>Semantically strips parameters on the fly, delivering full schemas only when explicitly requested. | Zero-allocation `bumpalo` arena mutation and `simd-json` scanning. |
-| **Proxy Latency & Memory Bloat**<br>Python-based LLM proxies add 50–100ms latency overhead and introduce security supply-chain risks. | **Zero-Copy Rust Engine**<br>Written in Rust using Axum and `bumpalo`. Adds virtually zero overhead (**P90 latency ~2.1ms**). | Compiled memory-safe binary running on Tokio asynchronous runtime with zero runtime dependencies. |
+Gateways answer: **"Where should this request go?"**<br>
+Kryneth answers: **"Should this action happen at all?"**
+
+Production AI teams deploying autonomous agents are currently defenseless against:
+**✗ Silent agent failures**<br>
+**✗ Infinite reasoning loops**<br>
+**✗ Tool storms**<br>
+**✗ MCP over-permission**<br>
+**✗ Cost explosions**
+
+---
+
+## 🚨 Real Production Incidents We Stop
+
+If you are building autonomous agents, you have likely experienced:
+* An agent calling the same tool 500 times in a row.
+* An agent consuming $120 overnight on a background task.
+* An MCP server returning malformed data that crashes the reasoning engine.
+* An OpenAI outage causing an entire multi-agent workflow to fail.
+
+Kryneth was designed specifically to stop these exact classes of incidents.
+
+---
+
+## 👥 Who Uses Kryneth
+
+* **AI SaaS Teams:** Protecting production margins and uptime.
+* **LangGraph & CrewAI Developers:** Governing multi-agent workflows.
+* **MCP Builders:** Securing tool execution and schemas.
+* **Claude Code Users:** Safely integrating local coding agents.
+* **AI Automation Agencies:** Guaranteeing client budget limits.
+* **Enterprise AI Teams:** Enforcing PII compliance and audit trails.
+
+---
+
+## 🛡️ Production Failures Kryneth Prevents
+
+### Scenario 1: The Infinite Reasoning Loop
+*An agent gets stuck retrying the same MCP tool 50 times.*
+* **Without Kryneth:** $300 bill and a dead workflow.
+* **With Kryneth:** Blocked instantly after 5 identical parameter signatures.
+
+### Scenario 2: Data Exfiltration
+*A user prompt or agent context contains a PAN or Aadhaar card.*
+* **Without Kryneth:** PII leakage to public LLMs.
+* **With Kryneth:** The compliance engine strips the PII locally before it leaves your infrastructure.
+
+### Scenario 3: Provider Outage
+*OpenAI returns a `429 Rate Limit` or `500 Error`.*
+* **Without Kryneth:** Application fails and user sees an error.
+* **With Kryneth:** Fallback route (e.g., Anthropic) executes automatically and transparently.
+
+---
+
+## 🎯 Features: Outcomes Over Infrastructure
+
+| Production Problem | Kryneth Solution |
+| :--- | :--- |
+| **Agent loops burn money** | Runaway Loop Protection |
+| **Tool storms** | Tool Governance |
+| **MCP over-permission** | Policy Enforcement |
+| **PII leakage** | PII Protection |
+| **Cost explosions** | Budget Controls |
+| **Silent failures** | Audit + Trace Foundation |
+
+---
+
+## 🎥 Live Terminal Demos
+
+### 1. Agentic Runaway Loop Trap
+Watch Kryneth block an agent stuck in a recursive loop executing the same tool over and over:
+
+![Agent Loop Blocked Demo](docs/agent_loop_blocked.gif)
+
+### 2. Circuit Breaker & Automatic LLM Hot-Swaps
+Watch Kryneth's circuit breaker catch a 429 Rate Limit and instantly hot-swap to Anthropic:
+
+![LLM Hot-Swap Demo](docs/llm_hotswap.gif)
 
 ---
 
 ## 🏗️ Architecture & Traffic Flow
-
-Kryneth acts as a semantic firewall, sitting directly between your agentic frameworks and upstream LLM providers to inspect and control traffic in real-time.
 
 ```mermaid
 graph TD
@@ -35,25 +127,30 @@ graph TD
     classDef upstream fill:#78350F,stroke:#F59E0B,stroke-width:2px,color:#F8FAFC
     
     subgraph ClientLayer ["Agentic Client Layer"]
-        Agent["AI Agent Frameworks<br>(CrewAI, LangChain, MCP)"]:::framework
+        Agent["AI Agent Frameworks<br>(LangGraph, CrewAI, AutoGen, MCP)"]:::framework
     end
     
-    subgraph Firewall ["Kryneth L7 Firewall Control Plane"]
+    subgraph Firewall ["Kryneth Runtime Control Plane"]
         Ingress["Kryneth Ingress<br/>(Axum HTTP & SSE Stream Router)"]:::ingress
         
-        subgraph Guardian ["Guardian Layer (Security & Abuse Firewall)"]
-            LoopTrap["Loop Detection<br/>(ahash signature trap)"]:::security
-            PII["PII Redaction<br/>(Regex Entity Filters)"]:::security
+        subgraph Guardian ["Reliability & Protection Layer"]
+            LoopTrap["Runaway Loop Protection<br/>(ahash signature trap)"]:::security
+            PII["PII Protection<br/>(Regex Entity Filters)"]:::security
         end
         
         subgraph RouteLayer ["Routing Layer (DX & Efficiency)"]
             L1Cache["L1 FastEmbed Cache<br/>(In-Memory Moka / DashMap)"]:::routing
             CircuitBreaker["Circuit Breaker & Fallbacks<br/>(Automatic hot-swaps)"]:::routing
+            MCPTunnel["MCP Server Tunnel<br/>(SSE Tool Routing)"]:::routing
         end
     end
     
     subgraph Providers ["Upstream LLM Layer"]
         OpenAI["OpenAI / Anthropic / Gemini / Groq"]:::upstream
+    end
+
+    subgraph External ["Local / Remote Resources"]
+        MCPServer["MCP Servers<br/>(Databases, Internal APIs)"]:::upstream
     end
 
     %% Flow connections
@@ -64,6 +161,8 @@ graph TD
     
     L1Cache -->|Cache Miss| CircuitBreaker
     CircuitBreaker -->|Route Call| OpenAI
+    MCPTunnel -->|Execute Tool| MCPServer
+    MCPServer -->|Return Data| MCPTunnel
     
     %% Fast responses
     L1Cache -->|Cache Hit - Fast Path 1.4ms| Ingress
@@ -71,6 +170,7 @@ graph TD
     
     %% Output
     OpenAI --> Ingress
+    MCPTunnel --> Ingress
     Ingress --> Agent
 ```
 
@@ -78,32 +178,68 @@ graph TD
 
 ## ⚡ Quickstart in 60 Seconds
 
-Developers judge a tool by its **Time to First Request**. Get Kryneth up and running locally in three simple steps.
+> 🏎️ **Performance Note:** Kryneth is built entirely in memory-safe Rust with `bumpalo` and `simd-json`. It adds virtually zero latency overhead (**P90 latency ~2.1ms**) between your agent and the LLM.
 
-### Step 1: Docker Magic
-Run the Kryneth gateway container on port `8080` instantly. Clone the repo and boot the system with one command:
+### One-Command Setup
+
+**Linux/macOS:**
+```bash
+git clone https://github.com/kryneth-admin/kryneth-oss.git && cd kryneth-oss
+bash setup.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/kryneth-admin/kryneth-oss.git
+cd kryneth-oss
+.\setup.ps1
+```
+
+> ✨ The setup script automatically:
+> - ✓ Copies `.env` and `routing.yaml` from templates
+> - ✓ Validates prerequisites (Docker, Rust, Git)
+> - ✓ Checks your API key configuration
+> - ✓ Shows deployment options
+
+---
+
+### Step 1: Docker Compose (Recommended)
+Run Kryneth on port `8080` instantly:
 
 ```bash
-# Clone the repository
-git clone https://github.com/kryneth-admin/kryneth-oss.git && cd kryneth-oss
-
-# Copy templates to default config files
-cp env.example .env
-cp routing.yaml.example routing.yaml
-
-# Boot up the control plane
 docker-compose up -d --build
 ```
 
+**Available at:** `http://localhost:8080`
+
 > [!NOTE]
-> If you prefer raw Docker, you can run Kryneth directly by passing the config environment file:
+> Alternative deployment options:
+> 
+> **Option A: Local Development**
 > ```bash
+> cargo run --release
+> ```
+>
+> **Option B: Raw Docker**
+> ```bash
+> docker build -t kryneth-gateway:latest .
 > docker run -d --name kryneth-gateway \
 >   -p 8080:8080 \
 >   -v $(pwd)/routing.yaml:/app/routing.yaml \
 >   --env-file .env \
->   kryneth-gateway-oss:latest
+>   kryneth-gateway:latest
 > ```
+>
+> **Option C: Docker Hub (Production)**
+> ```bash
+> docker pull krynethgw/kryneth-gateway:latest
+> docker run -d --name kryneth-gateway \
+>   -p 8080:8080 \
+>   -v $(pwd)/routing.yaml:/app/routing.yaml \
+>   --env-file .env \
+>   krynethgw/kryneth-gateway:latest
+> ```
+> See [Docker Hub Deployment Guide](./docs/DOCKER_HUB.md) for details.
 
 ### Step 2: Configuration
 Configure your models in `routing.yaml`. Kryneth maps virtual models to failover-prioritized providers using environment-injected API keys.
@@ -166,22 +302,71 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
----
-
 ## 🏛️ Open-Core Transparency
 
-Kryneth uses a strict, to ensure the open-source engine remains dependency-free, lock-free, and blazingly fast.
+Kryneth uses a strict open-core model. Users don't buy infrastructure components—they buy outcomes.
 
 | Capability | Open-Source (OSS) | Enterprise Edition |
 | :--- | :--- | :--- |
-| **Core Runtime Engine** | Rust Static Binary, Axum Web Engine. | Distributed High-Availability Cluster Deployment. |
-| **State Storage Layer** | Zero-dependency, lock-free `Moka` & `DashMap` (In-Memory). | Centralized, shared Redis clusters for synchronized state. |
-| **Agent Control Plane** | Infinite Loop & Tool Storm Traps. | Session budget kill-switches, recursion depth guards. |
-| **Observability** | Structured local JSON logs. | Distributed ClickHouse analytical ingestion. |
-| **Governance & Security** | Local config mapping (`routing.yaml`). | OPA Integration, RBAC, Multi-tenant PII Redaction. |
+| **Agent Loops** | Loop Detection | Incident Replay & Diagnostics |
+| **Tool Execution** | Tool Storm Detection | Policy Studio & Fleet Governance |
+| **MCP Security** | Basic MCP Governance | MCP Compliance Packs |
+| **Visibility** | Basic Audit & JSON Logs | Reliability Analytics & Dashboards |
+| **Budgeting** | Basic Cost Tracking | Budget Kill-Switches & Quotas |
 
 > **OSS Choice:** Best suited for local agent setups, single-node proxies, and developer environments.
 > **Enterprise Choice:** Tailored for production scale and compliance-sensitive enterprises requiring real-time analytical dashboards.
+
+---
+
+## 📚 Documentation & Resources
+
+Complete guides for every use case:
+
+| Guide | Purpose | Best For |
+|-------|---------|----------|
+| **[Getting Started](./docs/getting-started/quickstart.mdx)** | Installation & first request | New users, developers |
+| **[Configuration Reference](./docs/getting-started/operational-guide.md)** | All settings explained | Advanced setup, tuning |
+| **[Docker Hub Deployment](./docs/getting-started/docker-setup.md)** | Cloud & production deployments | AWS, GCP, Kubernetes, ECS |
+| **[API Reference](./docs/api-reference/endpoints.md)** | Full API endpoint documentation | Integration & SDK building |
+| **[Troubleshooting](./docs/getting-started/operational-guide.md#4-troubleshooting-common-scenarios)** | Common issues & solutions | Debugging problems |
+| **[Architecture Deep Dive](./docs/overview/architecture.md)** | System design & internals | Contributors, advanced users |
+
+### Setup Helpers
+
+- **[setup.sh](./setup.sh)** - Automated setup for Linux/macOS
+- **[setup.ps1](./setup.ps1)** - Automated setup for Windows PowerShell
+- **[.env.example](./env.example)** - Heavily commented configuration template
+- **[routing.yaml.example](./routing.yaml.example)** - Provider routing examples
+
+### Quick Reference
+
+```bash
+# One-command setup (Linux/macOS)
+bash setup.sh
+
+# One-command setup (Windows)
+.\setup.ps1
+
+# Docker Compose (recommended)
+docker-compose up -d --build
+
+# Local development
+cargo run --release
+
+# Docker Hub (production)
+docker run -p 8080:8080 --env-file .env -v $(pwd)/routing.yaml:/app/routing.yaml krynethgw/kryneth-gateway:latest
+```
+
+---
+
+## 🤝 Community & Support
+
+Building autonomous agents is hard. Let's figure it out together.
+
+* **[Join our Discord](https://discord.gg/uurgj9fMy8)** to chat with other engineers building production AI, share MCP tool ideas, and get direct help from the maintainers.
+* **GitHub Issues:** For bug reports and feature requests.
+* **GitHub Discussions:** For architectural questions and Q&A.
 
 ---
 

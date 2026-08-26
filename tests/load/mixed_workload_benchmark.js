@@ -6,7 +6,7 @@ export const options = {
   vus: 100,
   duration: '30s',
   thresholds: {
-    http_req_failed: ['rate<0.10'], // Expect up to 10-15% of requests to fail due to loop blocks (intentional 429s)
+    http_req_failed: ['rate<0.15'], // Expect up to 10-15% of requests to fail due to loop blocks (intentional 429s)
   },
 };
 

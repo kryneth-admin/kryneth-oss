@@ -254,20 +254,20 @@
             <!-- Theme Toggle and Controls -->
             <div class="mt-6 md:mt-0 flex flex-col md:flex-row gap-4 items-start md:items-center">
                 <div class="theme-toggle">
-                    <button class="active" onclick="toggleTheme('dark')" title="Dark Theme">
+                    <button class="active" data-theme="dark" title="Dark Theme">
                         🌙 Dark
                     </button>
-                    <button onclick="toggleTheme('light')" title="Light Theme">
+                    <button data-theme="light" title="Light Theme">
                         ☀️ Light
                     </button>
                 </div>
                 
-                <div class="neo-card px-4 py-3 flex items-center space-x-3 border-3">
-                    <div class="status-indicator"></div>
-                    <span class="text-xs font-bold tracking-wider uppercase">Online</span>
+                <div id="status-card" class="neo-card px-4 py-3 flex items-center space-x-3 border-3">
+                    <div id="status-dot" class="status-indicator"></div>
+                    <span id="status-text" class="text-xs font-bold tracking-wider uppercase">Online</span>
                 </div>
                 
-                <button onclick="resetMetrics()" class="neo-button px-4 py-3 bg-current hover:bg-opacity-90">
+                <button data-action="reset" class="neo-button px-4 py-3 bg-current hover:bg-opacity-90">
                     ↻ Reset
                 </button>
             </div>
@@ -373,7 +373,7 @@
                     Kryneth AI Engine Gateway Core v0.1.0 (OSS Edition)
                 </div>
                 <div class="flex items-center justify-center gap-3 border-l-3 border-r-3 border-current px-4 py-2">
-                    <span class="hover:opacity-60 cursor-pointer transition-opacity" onclick="clearSession();">CLEAR SESSION</span>
+                    <span class="hover:opacity-60 cursor-pointer transition-opacity" data-action="clear">CLEAR SESSION</span>
                     <span class="text-xl">•</span>
                     <a href="https://github.com/kryneth-admin/kryneth-oss/tree/master/docs" target="_blank" class="hover:opacity-60 transition-opacity">DOCS</a>
                 </div>
@@ -696,9 +696,19 @@
                     state.lastTimestamp = timestamp;
                     state.lastError = null;
 
+                    const statusDot = document.getElementById('status-dot');
+                    const statusText = document.getElementById('status-text');
+                    if (statusDot) statusDot.style.backgroundColor = 'var(--color-primary)';
+                    if (statusText) statusText.textContent = 'ONLINE';
+
                 } catch (err) {
                     console.error("Polling error:", err);
                     state.lastError = err;
+                    
+                    const statusDot = document.getElementById('status-dot');
+                    const statusText = document.getElementById('status-text');
+                    if (statusDot) statusDot.style.backgroundColor = 'var(--color-warning)';
+                    if (statusText) statusText.textContent = 'OFFLINE';
                     
                     // Update all metrics to error state
                     ['rps', 'latency', 'tokens', 'blocked'].forEach(key => {
@@ -786,23 +796,6 @@
         window.addEventListener('DOMContentLoaded', () => {
             Dashboard.init();
         });
-
-        // Export for inline onclick handlers (temporary compatibility)
-        function resetMetrics() {
-            Dashboard.resetMetrics();
-        }
-
-        function clearSession() {
-            if (confirm('Clear all session data? This will reset metrics and chart.')) {
-                localStorage.clear();
-                location.reload();
-            }
-        }
-
-        function toggleTheme(theme) {
-            const button = event?.target;
-            Dashboard.toggleTheme(theme, button);
-        }
     </script>
 </body>
 </html>

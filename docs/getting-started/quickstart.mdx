@@ -1,0 +1,108 @@
+---
+title: "Zero-to-Hero Quickstart"
+description: "Drop Kryneth into your infrastructure and configure your first model route in under 60 seconds."
+icon: "play"
+---
+
+Welcome! This quickstart guide walks you through launching Kryneth and routing requests from your application client.
+
+## 🎥 Live Terminal Demos
+
+### 1. Agentic Runaway Loop Trap
+Watch Kryneth block an agent stuck in a recursive loop executing the same tool over and over:
+![Agent Loop Blocked Demo](../agent_loop_blocked.gif)
+
+### 2. Circuit Breaker & Automatic LLM Hot-Swaps
+Watch Kryneth's circuit breaker catch a 429 Rate Limit and instantly hot-swap to Anthropic:
+![LLM Hot-Swap Demo](../llm_hotswap.gif)
+
+---
+
+## ⚡ Quickstart in 60 Seconds
+
+> 🏎️ **Performance Note:** Kryneth is built entirely in memory-safe Rust with `bumpalo` and `simd-json`. It adds virtually zero latency overhead (**P90 latency ~2.1ms**) between your agent and the LLM.
+
+### One-Command Setup
+
+**Linux/macOS:**
+```bash
+git clone https://github.com/kryneth/Kryneth-Gateway-OSS.git && cd Kryneth-Gateway-OSS
+bash setup.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+git clone https://github.com/kryneth/Kryneth-Gateway-OSS.git
+cd Kryneth-Gateway-OSS
+.\setup.ps1
+```
+
+---
+
+### Step 1: Run via Docker Compose (Recommended)
+Run Kryneth on port `8080` instantly:
+
+```bash
+docker-compose up -d --build
+```
+
+**Available at:** `http://localhost:8080`
+
+### Step 2: Configure Routing
+Configure your models in `routing.yaml`. Kryneth maps virtual models to failover-prioritized providers using environment-injected API keys.
+
+**`routing.yaml` model routing configuration:**
+```yaml
+# Tenant Mapping Route Setup
+"00000000-0000-0000-0000-000000000000": # Default Local Tenant ID
+  "llama-3.3-70b-versatile":           # Virtual Route Target
+    targets:
+      - priority: 1                     # Primary Upstream Route
+        weight: 100
+        api_key_alias: "GROQ_API_KEY"
+        provider_name: "groq"
+        base_url: "https://api.groq.com/openai/v1"
+        target_model: "llama-3.3-70b-versatile"
+        schema_format: "openai"
+      - priority: 2                     # Automatic Hot-Swap Fallback
+        weight: 100
+        api_key_alias: "COHERE_API_KEY"
+        provider_name: "cohere"
+        base_url: "https://api.cohere.com/compatibility/v1"
+        target_model: "command-r-plus-08-2024"
+        schema_format: "openai"
+    rate_limit_rpm: 60
+```
+
+### Step 3: Configure Environment
+Create a `.env` file at the root:
+```ini
+# Gateway Server Configuration
+GATEWAY_PORT=8080
+RUST_LOG=info
+
+# OSS Authentication key (Pass as 'Authorization: Bearer <key>')
+KRYNETH_VALID_KEYS=re_live_local_dev_123
+
+# Upstream API credentials
+GROQ_API_KEY=gsk_your_groq_key_here
+COHERE_API_KEY=h28_your_cohere_key_here
+```
+
+### Step 4: Dispatch Your First Request
+Send a unified OpenAI-compatible request targeting the virtual Llama-3 route. If the primary provider (Groq) is down, Kryneth automatically swaps the request to the secondary provider (Cohere) in **0.37ms**, transparently adapting schemas.
+
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer re_live_local_dev_123" \
+  -d '{
+    "model": "llama-3.3-70b-versatile",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Generate a security posture assessment for an autonomous agent."
+      }
+    ]
+  }'
+```

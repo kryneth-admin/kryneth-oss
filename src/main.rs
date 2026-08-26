@@ -18,7 +18,7 @@ use domain::models::{AppState, RoutingState};
 // ── Config defaults ───────────────────────────────────────────────────────────
 
 const DEFAULT_PORT: &str = "8080";
-const DEFAULT_COMPLIANCE_URL: &str = "http://localhost:8083";
+const DEFAULT_COMPLIANCE_URL: &str = "http://127.0.0.1:8083";
 const DEFAULT_RATE_LIMIT_MAX: &str = "60";
 const DEFAULT_RATE_LIMIT_WINDOW: &str = "60";
 const HTTP_TIMEOUT_SECS: u64 = 120;
@@ -125,6 +125,19 @@ async fn main() {
         .time_to_live(std::time::Duration::from_secs(60))
         .build();
 
+    // Bounded to ~10MB to prevent RAM exhaustion. TTL = 5 minutes.
+    let operation_cache = moka::future::Cache::builder()
+        .max_capacity(10 * 1024 * 1024)
+        .weigher(|k: &String, v: &domain::models::OpState| -> u32 {
+            let val_size = match v {
+                domain::models::OpState::InProgress { .. } | domain::models::OpState::Unknown => 16,
+                domain::models::OpState::Completed { content, .. } => content.len(),
+            };
+            (k.len() + val_size + 64).min(u32::MAX as usize) as u32
+        })
+        .time_to_live(std::time::Duration::from_secs(300))
+        .build();
+
     // ── MCP Connection Registry ─────────────────────────────────────────────
     let mcp_registry = infrastructure::mcp_registry::McpConnectionRegistry::from_env();
 
@@ -194,8 +207,9 @@ async fn main() {
         .store(Arc::new(initial_client_configs));
 
     // ── Telemetry / Billing / Auth Adapters ────────────────────────────────────
+    let trace_store = Arc::new(dashmap::DashMap::new());
     let telemetry: Arc<dyn crate::domain::ports::TelemetryPort> =
-        Arc::new(infrastructure::oss_adapters::OssTelemetry);
+        Arc::new(infrastructure::oss_adapters::OssTelemetry::new(trace_store.clone()));
 
     let billing: Arc<dyn crate::domain::ports::BillingPort> =
         Arc::new(infrastructure::oss_adapters::OssBilling);
@@ -212,13 +226,19 @@ async fn main() {
     let semantic_cache: Arc<dyn crate::domain::ports::SemanticCachePort> =
         Arc::new(infrastructure::oss_adapters::OssSemanticCache);
 
+    let llm_api_base_url = None;
+    let redis_url =
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis_client = redis::Client::open(redis_url).ok();
+
     let state = Arc::new(AppState {
         http_client: http_client.clone(),
         compliance_url,
         rate_limit_max,
         rate_limit_window,
         dashboard_url,
-        llm_api_base_url: None,
+        llm_api_base_url,
+        redis_client,
         telemetry,
         billing,
         auth_resolver,
@@ -233,7 +253,15 @@ async fn main() {
         mcp_registry,
         tool_registry,
         agent_guardian_cache,
+        operation_cache,
         dashboard_metrics,
+        pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
+        trace_store,
+        budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
     });
 
     // ── Start Port-based background workers ───────────────────────────────────
@@ -243,7 +271,7 @@ async fn main() {
 
     state
         .routing_config
-        .start_subscriber(state.routing_state.clone());
+        .start_subscriber(state.routing_state.clone(), state.mcp_registry.clone());
 
     // ── Server ────────────────────────────────────────────────────────────────
     let app: Router = api::routes::create_router(state);
