@@ -723,6 +723,12 @@ pub async fn execute_proxy(
         body_bytes.clone()
     };
 
+    let telemetry_prompt = if is_pii_match {
+        extract_response_content(Some(&body_bytes))
+    } else {
+        raw_prompt.to_string()
+    };
+
     let mut parse_buffer = body_bytes.to_vec();
 
     // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
@@ -752,7 +758,7 @@ pub async fn execute_proxy(
                 cached_content,
                 tenant_id,
                 model_name,
-                raw_prompt,
+                &telemetry_prompt,
                 semantic_text_str,
                 trace_ctx,
                 start_time,
@@ -789,7 +795,8 @@ pub async fn execute_proxy(
     let cache_future = {
         let embedding_vector = embedding_vector.clone();
         let semantic_text = semantic_text.clone();
-        let semantic_cache_enabled = client_config.semantic_cache_enabled && test_scenario.is_none();
+        let semantic_cache_enabled =
+            client_config.semantic_cache_enabled && test_scenario.is_none();
         async move {
             if !semantic_cache_enabled {
                 return None;
@@ -841,7 +848,7 @@ pub async fn execute_proxy(
             cached_content,
             tenant_id,
             model_name,
-            raw_prompt,
+            &telemetry_prompt,
             semantic_text_str,
             trace_ctx,
             start_time,
@@ -904,7 +911,7 @@ pub async fn execute_proxy(
             "latency_ms":      latency_ms,
             "total_tokens":    0_u32,
             "cache_hit":       false,
-            "prompt_content":  raw_prompt,
+            "prompt_content":  &telemetry_prompt,
             "response_content": "",
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
@@ -953,7 +960,7 @@ pub async fn execute_proxy(
             "latency_ms":      latency_ms,
             "total_tokens":    0_u32,
             "cache_hit":       false,
-            "prompt_content":  raw_prompt,
+            "prompt_content":  &telemetry_prompt,
             "response_content": "",
             "requested_provider": get_requested_provider(state, tenant_id, model_name),
             "executed_provider": "",
@@ -1065,7 +1072,7 @@ pub async fn execute_proxy(
             content_type,
             tenant_id,
             model_name,
-            raw_prompt,
+            &telemetry_prompt,
             semantic_text_str,
             trace_ctx,
             start_time,
@@ -1092,7 +1099,7 @@ pub async fn execute_proxy(
         content_type,
         tenant_id,
         model_name,
-        raw_prompt,
+        &telemetry_prompt,
         semantic_text_str,
         trace_ctx,
         start_time,
@@ -1442,7 +1449,9 @@ fn handle_streaming_response(
 
             if !fallback_succeeded {
                 // All fallbacks exhausted or failed. Send Err to client_tx to force HTTP stream abort.
-                tracing::error!("Stream interrupted and all fallbacks exhausted. Aborting stream connection.");
+                tracing::error!(
+                    "Stream interrupted and all fallbacks exhausted. Aborting stream connection."
+                );
                 let _ = client_tx
                     .send(Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
@@ -2469,7 +2478,9 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(
+                Arc::new(dashmap::DashMap::new()),
+            )),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -2674,7 +2685,9 @@ mod tests {
         );
         let err_str = format!("{:?}", result.err());
         assert!(
-            err_str.contains("ComplianceFailure") || err_str.contains("ModelNotConfigured") || err_str.contains("MissingModel"),
+            err_str.contains("ComplianceFailure")
+                || err_str.contains("ModelNotConfigured")
+                || err_str.contains("MissingModel"),
             "Expected compliance/routing check to run for >5MB payload: got {}",
             err_str
         );

@@ -153,7 +153,10 @@ pub async fn prep_upstream_request(
         .get(tenant_id)
         .or_else(|| routing_guard.get("00000000-0000-0000-0000-000000000000"))
         .ok_or_else(|| {
-            GatewayError::ModelNotConfigured(format!("No routing config for tenant '{}'", tenant_id))
+            GatewayError::ModelNotConfigured(format!(
+                "No routing config for tenant '{}'",
+                tenant_id
+            ))
         })?;
 
     let model_config = tenant_models
@@ -292,10 +295,7 @@ pub async fn execute_upstream_request(
             );
             // Open circuit breaker for 30s
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state
-                .circuit_breaker
-                .insert(cb_key, ())
-                .await;
+            state.circuit_breaker.insert(cb_key, ()).await;
 
             last_error = GatewayError::ResponseBuild(format!("Provider returned {}", status));
         }
@@ -307,10 +307,7 @@ pub async fn execute_upstream_request(
                 "Primary target network request failed — triggering circuit breaker"
             );
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
-            state
-                .circuit_breaker
-                .insert(cb_key, ())
-                .await;
+            state.circuit_breaker.insert(cb_key, ()).await;
 
             last_error = GatewayError::UpstreamUnreachable(e);
         }
@@ -381,10 +378,7 @@ pub async fn execute_upstream_request(
                     status = status,
                     "Fallback target returned retryable status code — triggering circuit breaker"
                 );
-                state
-                    .circuit_breaker
-                    .insert(cb_key, ())
-                    .await;
+                state.circuit_breaker.insert(cb_key, ()).await;
 
                 last_error = GatewayError::ResponseBuild(format!(
                     "Fallback target {} HTTP {}",
@@ -398,10 +392,7 @@ pub async fn execute_upstream_request(
                     error = %e,
                     "Fallback target network request failed — triggering circuit breaker"
                 );
-                state
-                    .circuit_breaker
-                    .insert(cb_key, ())
-                    .await;
+                state.circuit_breaker.insert(cb_key, ()).await;
 
                 last_error = GatewayError::UpstreamUnreachable(e);
             }
@@ -422,7 +413,8 @@ pub async fn execute_upstream_request_simple(
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
+    let prep =
+        prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
@@ -434,7 +426,8 @@ pub async fn route_chat_completion_with_fallback(
     accept_header: &str,
     strategy: RoutingStrategy,
 ) -> Result<(reqwest::Response, String, u8), GatewayError> {
-    let prep = prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
+    let prep =
+        prep_upstream_request(state, tenant_id, body_bytes, accept_header, strategy, None).await?;
     let (resp, key, hot_swapped, _) = execute_upstream_request(state, prep, body_bytes).await?;
     Ok((resp, key, hot_swapped))
 }
@@ -775,7 +768,9 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: Some(mock_server.uri()),
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(
+                Arc::new(dashmap::DashMap::new()),
+            )),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -1004,10 +999,16 @@ mod tests {
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
-        let prep =
-            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
-                .await
-                .unwrap();
+        let prep = prep_upstream_request(
+            &state,
+            "t1",
+            &mut body_mut,
+            "*/*",
+            RoutingStrategy::Default,
+            None,
+        )
+        .await
+        .unwrap();
 
         // 4. Verify: key-2 should have been selected as primary (prep.fallback_targets should be empty)
         assert_eq!(
@@ -1055,10 +1056,16 @@ mod tests {
         // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
-        let prep =
-            prep_upstream_request(&state, "t1", &mut body_mut, "*/*", RoutingStrategy::Default, None)
-                .await
-                .unwrap();
+        let prep = prep_upstream_request(
+            &state,
+            "t1",
+            &mut body_mut,
+            "*/*",
+            RoutingStrategy::Default,
+            None,
+        )
+        .await
+        .unwrap();
         let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
 
         // 4. Verify: Breaker is now open for "fail-key" under tenant t1

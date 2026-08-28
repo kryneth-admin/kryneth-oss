@@ -20,6 +20,79 @@ pub async fn enforce_loop_detection(
     Ok(())
 }
 
+fn extract_tool_calls_from_request<'a>(
+    parsed: &simd_json::BorrowedValue<'a>,
+) -> Vec<simd_json::BorrowedValue<'a>> {
+    let mut extracted = Vec::new();
+
+    // 1. OpenAI / Anthropic messages array
+    if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
+        for msg in messages {
+            // OpenAI tool_calls
+            if let Some(tc) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                for call in tc {
+                    extracted.push(call.clone());
+                }
+            }
+            // Anthropic tool_use inside content array or object
+            if let Some(content) = msg.get("content") {
+                if let Some(arr) = content.as_array() {
+                    for block in arr {
+                        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                            extracted.push(block.clone());
+                        }
+                    }
+                } else if content.is_object()
+                    && content.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+                {
+                    extracted.push(content.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Gemini contents array
+    if let Some(contents) = parsed.get("contents").and_then(|c| c.as_array()) {
+        for content in contents {
+            if let Some(parts) = content.get("parts").and_then(|p| p.as_array()) {
+                for part in parts {
+                    if part.get("functionCall").is_some() {
+                        extracted.push(part.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: Check root tool_calls (for compatibility/direct/tests)
+    if let Some(tc) = parsed.get("tool_calls").and_then(|t| t.as_array()) {
+        for call in tc {
+            extracted.push(call.clone());
+        }
+    }
+
+    // 4. Fallback: Check choices (OpenAI response format, if used in tests or legacy)
+    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
+        for choice in choices {
+            if let Some(msg) = choice.get("message") {
+                if let Some(tc) = msg.get("tool_calls").and_then(|t| t.as_array()) {
+                    for call in tc {
+                        extracted.push(call.clone());
+                    }
+                }
+            } else if let Some(delta) = choice.get("delta") {
+                if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                    for call in tc {
+                        extracted.push(call.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    extracted
+}
+
 /// OSS runaway agent guardian for tool storms and loop detection.
 #[instrument(skip(state, body_bytes), fields(session_id = %session_id))]
 pub async fn enforce_oss_agent_guardian(
@@ -28,14 +101,6 @@ pub async fn enforce_oss_agent_guardian(
     session_id: &str,
     body_bytes: &[u8],
 ) -> Result<(), GatewayError> {
-    // ── Fast-path: byte-level scan for tool_calls ─────────────────────────────
-    if !body_bytes
-        .windows(b"tool_calls".len())
-        .any(|w| w == b"tool_calls")
-    {
-        return Ok(());
-    }
-
     // Clone body bytes since simd_json mutates the buffer in-place
     let mut buffer = body_bytes.to_vec();
 
@@ -44,44 +109,12 @@ pub async fn enforce_oss_agent_guardian(
         Err(_) => return Ok(()),
     };
 
-    let tool_calls = match parsed.get("tool_calls").and_then(|t| t.as_array()) {
-        Some(t) if !t.is_empty() => t,
-        _ => {
-            // Check for choices array (OpenAI format)
-            if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-                if let Some(first_choice) = choices.first() {
-                    if let Some(message) = first_choice.get("message") {
-                        if let Some(tc) = message.get("tool_calls").and_then(|t| t.as_array()) {
-                            if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
-                                    .await;
-                            }
-                        }
-                    } else if let Some(delta) = first_choice.get("delta") {
-                        if let Some(tc) = delta.get("tool_calls").and_then(|t| t.as_array()) {
-                            if !tc.is_empty() {
-                                return enforce_oss_tool_calls(state, tenant_id, session_id, tc)
-                                    .await;
-                            }
-                        }
-                    }
-                }
-            }
-            // Check messages array (some incoming requests might have tool_calls in the last message)
-            if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
-                if let Some(last_msg) = messages.last() {
-                    if let Some(tc) = last_msg.get("tool_calls").and_then(|t| t.as_array()) {
-                        if !tc.is_empty() {
-                            return enforce_oss_tool_calls(state, tenant_id, session_id, tc).await;
-                        }
-                    }
-                }
-            }
-            return Ok(());
-        }
-    };
+    let tool_calls = extract_tool_calls_from_request(&parsed);
+    if tool_calls.is_empty() {
+        return Ok(());
+    }
 
-    enforce_oss_tool_calls(state, tenant_id, session_id, tool_calls).await
+    enforce_oss_tool_calls(state, tenant_id, session_id, &tool_calls).await
 }
 
 struct UnifiedToolCall {
@@ -367,7 +400,7 @@ fn sandbox_is_fail_open() -> bool {
     // we default to fail-open to allow agent tool calls to proceed without 503 timeouts.
     std::env::var("SANDBOX_FALLBACK_MODE")
         .map(|v| v.eq_ignore_ascii_case("open") || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// Compact deny payload — single JSON object, minimal token cost.
@@ -395,79 +428,112 @@ pub async fn enforce_mcp_sandbox(
         Err(_) => return Ok(response_body),
     };
 
-    let tool_name: String = body_val
-        .pointer("/choices/0/message/tool_calls/0/function/name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown_tool")
-        .to_string();
+    let tool_calls = body_val
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(|v| v.as_array());
+
+    let tool_names: Vec<String> = if let Some(arr) = tool_calls {
+        let mut names = Vec::new();
+        for tc in arr {
+            if let Some(name) = tc.pointer("/function/name").and_then(|n| n.as_str()) {
+                names.push(name.to_string());
+            }
+        }
+        if names.is_empty() {
+            vec!["unknown_tool".to_string()]
+        } else {
+            names
+        }
+    } else {
+        vec!["unknown_tool".to_string()]
+    };
 
     // ── Non-blocking OPA RBAC check ──────────────────────────────────────────
-    let opa_url = format!(
-        "{}/v1/data/kryneth/mcp/allow",
-        state.compliance_url.trim_end_matches('/')
-    );
-
-    let opa_payload = serde_json::json!({
-        "input": {
-            "tenant_id": tenant_id,
-            "tool_name": tool_name,
-            "action": "execute"
-        }
-    });
-
-    let opa_result = state
-        .http_client
-        .post(&opa_url)
-        .timeout(std::time::Duration::from_millis(200))
-        .json(&opa_payload)
-        .send()
-        .await;
-
     let fail_open = sandbox_is_fail_open();
+    let mut check_futures = Vec::new();
 
-    let denied = match opa_result {
-        Ok(resp) if resp.status().is_success() => {
-            let allow: bool = resp
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|v| v["result"].as_bool())
-                .unwrap_or(fail_open);
-            !allow
-        }
-        Ok(resp) => {
-            warn!(
-                status = resp.status().as_u16(),
-                tool_name = %tool_name,
-                fail_open,
-                "MCP sandbox: OPA returned non-2xx — applying fallback mode"
-            );
-            !fail_open
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                tool_name = %tool_name,
-                fail_open,
-                "MCP sandbox: OPA unreachable — applying fallback mode"
-            );
-            if !fail_open && e.is_timeout() {
-                return Err(GatewayError::SecurityTimeout(
-                    "OPA Sandbox Validation timed out".into(),
-                ));
+    for tool_name in &tool_names {
+        let opa_url = format!(
+            "{}/v1/data/kryneth/mcp/allow",
+            state.compliance_url.trim_end_matches('/')
+        );
+        let opa_payload = serde_json::json!({
+            "input": {
+                "tenant_id": tenant_id,
+                "tool_name": tool_name.clone(),
+                "action": "execute"
             }
-            !fail_open
+        });
+        let client = state.http_client.clone();
+        let tool_name_clone = tool_name.clone();
+
+        check_futures.push(async move {
+            let res = client
+                .post(&opa_url)
+                .timeout(std::time::Duration::from_millis(200))
+                .json(&opa_payload)
+                .send()
+                .await;
+            (tool_name_clone, res)
+        });
+    }
+
+    let results = futures::future::join_all(check_futures).await;
+    let mut denied = false;
+    let mut denied_tool = None;
+
+    for (tool_name, opa_result) in results {
+        let tool_denied = match opa_result {
+            Ok(resp) if resp.status().is_success() => {
+                let allow: bool = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v["result"].as_bool())
+                    .unwrap_or(fail_open);
+                !allow
+            }
+            Ok(resp) => {
+                warn!(
+                    status = resp.status().as_u16(),
+                    tool_name = %tool_name,
+                    fail_open,
+                    "MCP sandbox: OPA returned non-2xx — applying fallback mode"
+                );
+                !fail_open
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    tool_name = %tool_name,
+                    fail_open,
+                    "MCP sandbox: OPA unreachable — applying fallback mode"
+                );
+                if !fail_open && e.is_timeout() {
+                    return Err(GatewayError::SecurityTimeout(
+                        "OPA Sandbox Validation timed out".into(),
+                    ));
+                }
+                !fail_open
+            }
+        };
+
+        if tool_denied {
+            denied = true;
+            denied_tool = Some(tool_name);
+            break;
         }
-    };
+    }
 
     if !denied {
         return Ok(response_body);
     }
 
     // ── Compact Soft-Steering Mutation ────────────────────────────────────────
+    let logged_tool = denied_tool.unwrap_or_else(|| "unknown_tool".to_string());
     tracing::warn!(
         tenant_id = %tenant_id,
-        tool_name = %tool_name,
+        tool_name = %logged_tool,
         "Tunnel 3 Phase 3 — OPA denied; injecting compact soft-steer response"
     );
 
@@ -516,8 +582,8 @@ mod tests {
     fn test_sandbox_fail_open_env_flag() {
         std::env::remove_var("SANDBOX_FALLBACK_MODE");
         assert!(
-            sandbox_is_fail_open(),
-            "Default must be fail-open in OSS mode"
+            !sandbox_is_fail_open(),
+            "Default must be fail-closed in OSS mode"
         );
 
         std::env::set_var("SANDBOX_FALLBACK_MODE", "open");
@@ -578,7 +644,9 @@ mod tests {
             dashboard_url: String::new(),
             llm_api_base_url: None,
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(
+                Arc::new(dashmap::DashMap::new()),
+            )),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
@@ -767,6 +835,205 @@ mod tests {
         assert_ne!(
             tc_id1.semantic_hash, tc_id2.semantic_hash,
             "The 'id' field must not be stripped from hash payload"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_extract_tool_calls_from_request_formats() {
+        // OpenAI Format
+        let openai_body = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "openai_tool",
+                                "arguments": "{}"
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        let mut bytes = serde_json::to_vec(&openai_body).unwrap();
+        let parsed = simd_json::to_borrowed_value(&mut bytes).unwrap();
+        let extracted = extract_tool_calls_from_request(&parsed);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(
+            extracted[0]["function"]["name"].as_str(),
+            Some("openai_tool")
+        );
+
+        // Anthropic Format
+        let anthropic_body = serde_json::json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_2",
+                            "name": "anthropic_tool",
+                            "input": {}
+                        }
+                    ]
+                }
+            ]
+        });
+        let mut bytes = serde_json::to_vec(&anthropic_body).unwrap();
+        let parsed = simd_json::to_borrowed_value(&mut bytes).unwrap();
+        let extracted = extract_tool_calls_from_request(&parsed);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0]["name"].as_str(), Some("anthropic_tool"));
+
+        // Gemini Format
+        let gemini_body = serde_json::json!({
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {
+                                "name": "gemini_tool",
+                                "args": {}
+                            }
+                        }
+                    ]
+                }
+            ]
+        });
+        let mut bytes = serde_json::to_vec(&gemini_body).unwrap();
+        let parsed = simd_json::to_borrowed_value(&mut bytes).unwrap();
+        let extracted = extract_tool_calls_from_request(&parsed);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(
+            extracted[0]["functionCall"]["name"].as_str(),
+            Some("gemini_tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_sandbox_multi_tool_denied() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        // Mock tool_1 allowed
+        Mock::given(method("POST"))
+            .and(path("/v1/data/kryneth/mcp/allow"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "input": {
+                    "tenant_id": "test-tenant",
+                    "tool_name": "tool_1",
+                    "action": "execute"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Mock tool_2 denied
+        Mock::given(method("POST"))
+            .and(path("/v1/data/kryneth/mcp/allow"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "input": {
+                    "tenant_id": "test-tenant",
+                    "tool_name": "tool_2",
+                    "action": "execute"
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": false
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let state = Arc::new(AppState {
+            http_client: reqwest::Client::new(),
+            compliance_url: mock_server.uri(),
+            rate_limit_max: 60,
+            rate_limit_window: 60,
+            dashboard_url: String::new(),
+            llm_api_base_url: None,
+            redis_client: None,
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(
+                Arc::new(dashmap::DashMap::new()),
+            )),
+            billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
+            auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
+            rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
+            routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
+            semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            rate_limit_cache: Arc::new(dashmap::DashMap::new()),
+            l1_cache: Arc::new(L1Cache::new(1024).unwrap()),
+            routing_state: Arc::new(RoutingState::new()),
+            circuit_breaker: moka::future::Cache::builder().build(),
+            loop_fallback_cache: moka::future::Cache::builder().build(),
+            mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
+            tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
+            agent_guardian_cache: moka::future::Cache::builder().build(),
+            operation_cache: moka::future::Cache::builder().build(),
+            dashboard_metrics: Arc::new(crate::domain::models::DashboardMetrics::new()),
+            pricing_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+            trace_store: Arc::new(dashmap::DashMap::new()),
+            budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(
+                std::collections::HashMap::new(),
+            )),
+        });
+
+        // Response with multiple tool calls
+        let response_body_json = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "tool_1"
+                                }
+                            },
+                            {
+                                "id": "call_2",
+                                "type": "function",
+                                "function": {
+                                    "name": "tool_2"
+                                }
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        let response_bytes = serde_json::to_vec(&response_body_json).unwrap();
+        let res_bytes = enforce_mcp_sandbox(&state, "test-tenant", response_bytes)
+            .await
+            .unwrap();
+
+        let res_json: serde_json::Value = serde_json::from_slice(&res_bytes).unwrap();
+        assert_eq!(
+            res_json["choices"][0]["message"]["role"].as_str(),
+            Some("tool")
+        );
+        assert!(res_json["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Policy Denied"));
+        assert!(res_json["choices"][0]["message"]["tool_calls"].is_null());
+        assert_eq!(
+            res_json["choices"][0]["finish_reason"].as_str(),
+            Some("stop")
         );
     }
 }

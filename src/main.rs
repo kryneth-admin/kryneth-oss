@@ -208,8 +208,9 @@ async fn main() {
 
     // ── Telemetry / Billing / Auth Adapters ────────────────────────────────────
     let trace_store = Arc::new(dashmap::DashMap::new());
-    let telemetry: Arc<dyn crate::domain::ports::TelemetryPort> =
-        Arc::new(infrastructure::oss_adapters::OssTelemetry::new(trace_store.clone()));
+    let telemetry: Arc<dyn crate::domain::ports::TelemetryPort> = Arc::new(
+        infrastructure::oss_adapters::OssTelemetry::new(trace_store.clone()),
+    );
 
     let billing: Arc<dyn crate::domain::ports::BillingPort> =
         Arc::new(infrastructure::oss_adapters::OssBilling);

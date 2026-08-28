@@ -83,7 +83,12 @@ pub async fn chat_completions(
     let tenant_id_owned = extensions
         .get::<crate::api::middleware::auth::Claims>()
         .map(|c| c.tenant_id.clone())
-        .or_else(|| headers.get("x-tenant-id").and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string()))
+        .or_else(|| {
+            headers
+                .get("x-tenant-id")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        })
         .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string());
     let tenant_id = tenant_id_owned.as_str();
     tracing::debug!(
@@ -536,8 +541,12 @@ mod tests {
             role: Role::Developer,
         };
 
-        let scenario = extract_test_scenario_with_env(&headers, Some(&client_claims), Some("production"));
-        assert_eq!(scenario, None, "Guard 1 + 2 must discard scenario header for normal client in production");
+        let scenario =
+            extract_test_scenario_with_env(&headers, Some(&client_claims), Some("production"));
+        assert_eq!(
+            scenario, None,
+            "Guard 1 + 2 must discard scenario header for normal client in production"
+        );
     }
 
     #[test]
@@ -555,8 +564,13 @@ mod tests {
             role: Role::Admin,
         };
 
-        let scenario = extract_test_scenario_with_env(&headers, Some(&admin_claims), Some("production"));
-        assert_eq!(scenario, Some("rate-limit"), "Guard 2 must allow scenario header for Role::Admin in production");
+        let scenario =
+            extract_test_scenario_with_env(&headers, Some(&admin_claims), Some("production"));
+        assert_eq!(
+            scenario,
+            Some("rate-limit"),
+            "Guard 2 must allow scenario header for Role::Admin in production"
+        );
     }
 
     #[test]
@@ -574,8 +588,16 @@ mod tests {
             role: Role::Developer,
         };
 
-        let scenario = extract_test_scenario_with_env(&headers, Some(&internal_key_claims), Some("production"));
-        assert_eq!(scenario, Some("server-error"), "Guard 2 must allow scenario header for internal_test_key in production");
+        let scenario = extract_test_scenario_with_env(
+            &headers,
+            Some(&internal_key_claims),
+            Some("production"),
+        );
+        assert_eq!(
+            scenario,
+            Some("server-error"),
+            "Guard 2 must allow scenario header for internal_test_key in production"
+        );
     }
 
     #[test]
