@@ -911,7 +911,9 @@ mod tests {
             dashboard_url: "http://localhost:5173".to_string(),
             llm_api_base_url: None,
             redis_client: None,
-            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(Arc::new(dashmap::DashMap::new()))),
+            telemetry: Arc::new(crate::infrastructure::oss_adapters::OssTelemetry::new(
+                Arc::new(dashmap::DashMap::new()),
+            )),
             billing: Arc::new(crate::infrastructure::oss_adapters::OssBilling),
             auth_resolver: Arc::new(crate::infrastructure::oss_adapters::OssAuth),
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),

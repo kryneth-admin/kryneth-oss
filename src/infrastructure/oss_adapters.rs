@@ -28,7 +28,11 @@ impl OssTelemetry {
 impl TelemetryPort for OssTelemetry {
     fn log_event(&self, event: serde_json::Value) {
         tracing::info!(telemetry_event = ?event, "OSS Telemetry Log Event");
-        if let Some(trace_id) = event.get("trace_id").or_else(|| event.get("id")).and_then(|v| v.as_str()) {
+        if let Some(trace_id) = event
+            .get("trace_id")
+            .or_else(|| event.get("id"))
+            .and_then(|v| v.as_str())
+        {
             self.trace_store.insert(trace_id.to_string(), event);
         }
     }
