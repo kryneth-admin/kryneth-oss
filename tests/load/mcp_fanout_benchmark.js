@@ -19,7 +19,13 @@ const HEADERS = {
 };
 
 // Generates a mock MCP tool call request
-function createFanoutRequest(id) {
+function createFanoutRequest(id, executionId, idempotencyKey) {
+  const headers = Object.assign({}, HEADERS, {
+    'X-Workflow-ID': 'wf-bench',
+    'X-Agent-ID': 'ag-bench',
+    'X-Execution-ID': executionId,
+    'X-Idempotency-Key': `${idempotencyKey}-${id}`,
+  });
   return {
     method: 'POST',
     url: `${BASE_URL}/v1/chat/completions`,
@@ -28,15 +34,18 @@ function createFanoutRequest(id) {
       messages: [{ role: 'user', content: `Execute MCP tool function ${id} for iter ${__ITER}` }],
       stream: false,
     }),
-    params: { headers: HEADERS },
+    params: { headers: headers },
   };
 }
 
 export default function () {
+  const executionId = `exec-${__VU}-${__ITER}-${Math.random()}`;
+  const idempotencyKey = `idem-${__VU}-${__ITER}-${Math.random()}`;
+
   // Mock a scenario where 1 parent request triggers 10 parallel tool calls (fan-out)
   const requests = [];
   for (let i = 0; i < 10; i++) {
-    requests.push(createFanoutRequest(i));
+    requests.push(createFanoutRequest(i, executionId, idempotencyKey));
   }
 
   // http.batch executes the requests in parallel

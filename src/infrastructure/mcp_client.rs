@@ -21,16 +21,17 @@
 //!   — LLM always receives a uniform array regardless of partial failures.
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::time::timeout;
 use tracing::{info, warn};
 
-use crate::domain::models::{AppState, OpState};
+use crate::domain::models::AppState;
 use crate::domain::utp_models::{ToolExecutionStatus, UniversalToolResult};
+use crate::infrastructure::mcp_registry::McpConnectionRegistry;
 use crate::infrastructure::providers::traits::UniversalProviderAdapter;
 
 // ── Idempotency helpers ────────────────────────────────────────────────────────
@@ -129,18 +130,12 @@ pub fn extract_tool_calls(
 /// ## Concurrency model (Phase 4)
 /// `futures::stream::buffer_unordered(10)` ensures at most **10 simultaneous
 /// outbound MCP connections per fan-out batch**, preventing downstream overload.
-/// Each call is individually wrapped in a `tokio::time::timeout(5s)` so a
-/// single slow server cannot stall the entire batch.
-///
-/// ## Timeout handling
-/// Timed-out calls produce a `ToolResult` with `content = {"error":"MCP_TIMEOUT"}`
-/// and `success = false`.  They are merged alongside successful results so the
-/// LLM always receives a complete, uniform response array.
 pub async fn fan_out(
     tool_calls: Vec<ToolCall>,
     tenant_id: &str,
     state: &Arc<AppState>,
     enable_compression: bool,
+    trace_ctx: &crate::domain::models::TraceContext,
 ) -> Vec<ToolResult> {
     if tool_calls.is_empty() {
         return Vec::new();
@@ -151,244 +146,34 @@ pub async fn fan_out(
 
     info!(
         fan_out_count,
-        "Tunnel 3 Phase 4 — bounded fan-out dispatching (limit: 10 concurrent)"
+        "Tunnel 3 Phase 4 — bounded fan-out dispatching via ExecutionService (limit: 10 concurrent)"
     );
 
     let tenant_id_owned = tenant_id.to_string();
-    // Build a stream of futures; buffer_unordered(10) enforces the concurrency cap.
-    let results: Vec<ToolResult> = stream::iter(tool_calls)
-        .map(|tc| {
+    let results: Vec<ToolResult> = stream::iter(tool_calls.into_iter().enumerate())
+        .map(|(index, tc)| {
             let state = state.clone();
             let tenant_id_c = tenant_id_owned.clone();
+            let trace_ctx_c = trace_ctx.clone();
             async move {
-                let op_key = generate_idempotency_key(&tenant_id_c, &tc.name, &tc.arguments);
-
-                // 1. Check if state already exists in operation_cache
-                if let Some(existing_state) = state.operation_cache.get(&op_key).await {
-                    match existing_state {
-                        OpState::Completed { content, latency_ms } => {
-                            info!(
-                                tool_name = %tc.name,
-                                op_key = %op_key,
-                                "Semantic MCP Idempotency — returning cached result"
-                            );
-                            return ToolResult {
-                                tool_call_id: tc.id,
-                                name: tc.name,
-                                content,
-                                latency_ms,
-                                success: true,
-                            };
-                        }
-                        OpState::InProgress { lease_until } => {
-                            let now = std::time::Instant::now();
-                            if now < lease_until {
-                                state
-                                    .dashboard_metrics
-                                    .mcp_already_in_flight_blocked
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                warn!(
-                                    tool_name = %tc.name,
-                                    op_key = %op_key,
-                                    "Semantic MCP Idempotency — call already in flight"
-                                );
-                                return ToolResult {
-                                    tool_call_id: tc.id,
-                                    name: tc.name,
-                                    content: r#"{"error":"ALREADY_IN_FLIGHT"}"#.to_string(),
-                                    latency_ms: 0,
-                                    success: false,
-                                };
-                            } else {
-                                state
-                                    .dashboard_metrics
-                                    .mcp_previous_attempt_unknown_blocked
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                warn!(
-                                    tool_name = %tc.name,
-                                    op_key = %op_key,
-                                    "Semantic MCP Idempotency — expired lease lock"
-                                );
-                                return ToolResult {
-                                    tool_call_id: tc.id,
-                                    name: tc.name,
-                                    content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
-                                    latency_ms: 0,
-                                    success: false,
-                                };
-                            }
-                        }
-                        OpState::Unknown => {
-                            state
-                                .dashboard_metrics
-                                .mcp_previous_attempt_unknown_blocked
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            warn!(
-                                tool_name = %tc.name,
-                                op_key = %op_key,
-                                "Semantic MCP Idempotency — previous attempt failed/timed out, auto-retry blocked"
-                            );
-                            return ToolResult {
-                                tool_call_id: tc.id,
-                                name: tc.name,
-                                content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
-                                latency_ms: 0,
-                                success: false,
-                            };
-                        }
-                    }
-                }
-
-                // 2. Use Moka get_with to atomically lock the key if vacant (TOCTOU stampede prevention)
-                let lease_until = std::time::Instant::now() + std::time::Duration::from_secs(10);
-                let current_state = state
-                    .operation_cache
-                    .get_with(op_key.clone(), async {
-                        OpState::InProgress { lease_until }
-                    })
-                    .await;
-
-                match current_state {
-                    OpState::Completed { content, latency_ms } => {
-                        return ToolResult {
-                            tool_call_id: tc.id,
-                            name: tc.name,
-                            content,
-                            latency_ms,
-                            success: true,
-                        };
-                    }
-                    OpState::InProgress { lease_until: locked_until } => {
-                        if locked_until != lease_until {
-                            let now = std::time::Instant::now();
-                            if now < locked_until {
-                                state
-                                    .dashboard_metrics
-                                    .mcp_already_in_flight_blocked
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                return ToolResult {
-                                    tool_call_id: tc.id,
-                                    name: tc.name,
-                                    content: r#"{"error":"ALREADY_IN_FLIGHT"}"#.to_string(),
-                                    latency_ms: 0,
-                                    success: false,
-                                };
-                            } else {
-                                state
-                                    .dashboard_metrics
-                                    .mcp_previous_attempt_unknown_blocked
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                return ToolResult {
-                                    tool_call_id: tc.id,
-                                    name: tc.name,
-                                    content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
-                                    latency_ms: 0,
-                                    success: false,
-                                };
-                            }
-                        }
-                    }
-                    OpState::Unknown => {
-                        state
-                            .dashboard_metrics
-                            .mcp_previous_attempt_unknown_blocked
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return ToolResult {
-                            tool_call_id: tc.id,
-                            name: tc.name,
-                            content: r#"{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}"#.to_string(),
-                            latency_ms: 0,
-                            success: false,
-                        };
-                    }
-                }
-
-                // 3. Current thread claimed lease (locked_until == lease_until).
-                // Spawn tool call in a detached task so execution survives client disconnects.
-                let tc_task = tc.clone();
-                let tenant_id_task = tenant_id_c.clone();
-                let state_task = state.clone();
-                let op_key_task = op_key.clone();
-
-                let exec_handle = tokio::spawn(async move {
-                    let res = execute_single_tool_call(
-                        tc_task,
-                        &tenant_id_task,
-                        &state_task,
-                        enable_compression,
-                    )
-                    .await;
-
-                    if res.success {
-                        state_task
-                            .operation_cache
-                            .insert(
-                                op_key_task,
-                                OpState::Completed {
-                                    content: res.content.clone(),
-                                    latency_ms: res.latency_ms,
-                                },
-                            )
-                            .await;
-                    } else {
-                        state_task
-                            .operation_cache
-                            .insert(op_key_task, OpState::Unknown)
-                            .await;
-                    }
-                    res
-                });
-
-                let exec_res = timeout(std::time::Duration::from_secs(5), exec_handle).await;
-
-                match exec_res {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(join_err)) => {
-                        state
-                            .operation_cache
-                            .insert(op_key, OpState::Unknown)
-                            .await;
-                        warn!(
-                            tool_name = %tc.name,
-                            error = %join_err,
-                            "Tunnel 3 Phase 4 — MCP tool call task failed/cancelled"
-                        );
-                        ToolResult {
-                            tool_call_id: tc.id,
-                            name: tc.name,
-                            content: r#"{"error":"MCP_TASK_FAILED"}"#.to_string(),
-                            latency_ms: 5000,
-                            success: false,
-                        }
-                    }
-                    Err(_elapsed) => {
-                        // Timeout: spawned task continues running in background and will set OpState on finish
-                        state
-                            .operation_cache
-                            .insert(op_key, OpState::Unknown)
-                            .await;
-                        warn!(
-                            tool_name = %tc.name,
-                            "Tunnel 3 Phase 4 — MCP tool call timed out (5s)"
-                        );
-                        ToolResult {
-                            tool_call_id: tc.id,
-                            name: tc.name,
-                            content: r#"{"error":"MCP_TIMEOUT"}"#.to_string(),
-                            latency_ms: 5000,
-                            success: false,
-                        }
-                    }
-                }
+                crate::usecases::execution_service::ExecutionService::execute_tool(
+                    &state,
+                    tc,
+                    &tenant_id_c,
+                    &trace_ctx_c,
+                    index,
+                    fan_out_count,
+                    enable_compression,
+                )
+                .await
             }
         })
-        .buffer_unordered(10) // Hard concurrency cap per session.
+        .buffer_unordered(10) // Bounded concurrency is preserved!
         .collect()
         .await;
 
     let total_latency_ms = batch_start.elapsed().as_millis() as u64;
 
-    // Emit fan-out telemetry (fire-and-forget).
     let telemetry_payload =
         build_telemetry_payload(&results, fan_out_count, total_latency_ms, tenant_id);
     state.telemetry.log_event(telemetry_payload);
@@ -443,13 +228,15 @@ pub fn merge_results(
 async fn execute_single_tool_call(
     tc: ToolCall,
     tenant_id: &str,
-    state: &Arc<AppState>,
+    mcp_registry: &Arc<McpConnectionRegistry>,
+    http_client: &reqwest::Client,
     enable_compression: bool,
+    test_scenario: Option<String>,
 ) -> ToolResult {
     let start = std::time::Instant::now();
 
     // Resolve the MCP endpoint URL from the Phase 1 registry.
-    let sse_url = match state.mcp_registry.get_url(&tc.name) {
+    let sse_url = match mcp_registry.get_url(&tc.name) {
         Some(url) => url,
         None => {
             warn!(
@@ -477,23 +264,23 @@ async fn execute_single_tool_call(
         }
     });
 
-    // POST to the MCP server's messages endpoint.
     let messages_url = format!("{}/messages", sse_url.trim_end_matches('/'));
 
-    let response = state
-        .http_client
+    let mut request_builder = http_client
         .post(&messages_url)
         .timeout(std::time::Duration::from_millis(4500)) // < 5s outer tokio timeout
-        .json(&mcp_body)
-        .send()
-        .await;
+        .json(&mcp_body);
+
+    if let Some(scenario) = test_scenario {
+        request_builder = request_builder.header("X-Test-Scenario", scenario);
+    }
+
+    let response = request_builder.send().await;
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
     // Record dynamic tool call telemetry in-memory (zero-copy, concurrent)
-    state
-        .mcp_registry
-        .record_tool_call(tenant_id, &tc.name, latency_ms);
+    mcp_registry.record_tool_call(tenant_id, &tc.name, latency_ms);
 
     match response {
         Ok(resp) if resp.status().is_success() => {
@@ -681,6 +468,55 @@ fn build_telemetry_payload(
         "tools": tool_metrics,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     })
+}
+
+// ── McpToolTransport ──────────────────────────────────────────────────────────
+
+pub struct McpToolTransport {
+    pub http_client: reqwest::Client,
+    pub mcp_registry: Arc<McpConnectionRegistry>,
+}
+
+impl McpToolTransport {
+    pub fn new(http_client: reqwest::Client, mcp_registry: Arc<McpConnectionRegistry>) -> Self {
+        Self {
+            http_client,
+            mcp_registry,
+        }
+    }
+}
+
+impl crate::domain::ports::ToolTransport for McpToolTransport {
+    fn execute_tool<'a>(
+        &'a self,
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        arguments: &'a str,
+        tenant_id: &'a str,
+        enable_compression: bool,
+        test_scenario: Option<&'a str>,
+    ) -> Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+        let tc = ToolCall {
+            id: tool_call_id.to_string(),
+            name: tool_name.to_string(),
+            arguments: arguments.to_string(),
+        };
+        let tenant_owned = tenant_id.to_string();
+        let mcp_registry = self.mcp_registry.clone();
+        let http_client = self.http_client.clone();
+        let test_scenario_owned = test_scenario.map(|s| s.to_string());
+        Box::pin(async move {
+            execute_single_tool_call(
+                tc,
+                &tenant_owned,
+                &mcp_registry,
+                &http_client,
+                enable_compression,
+                test_scenario_owned,
+            )
+            .await
+        })
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -919,6 +755,13 @@ mod tests {
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
             routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
             semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            execution_store: Arc::new(
+                crate::infrastructure::oss_adapters::MokaExecutionStore::new(
+                    operation_cache.clone(),
+                ),
+            ),
+            reconciler: Arc::new(crate::infrastructure::oss_adapters::OssReconciler),
+            tool_transport: Arc::new(crate::infrastructure::oss_adapters::OssToolTransport),
             rate_limit_cache: Arc::new(dashmap::DashMap::new()),
             l1_cache: Arc::new(crate::infrastructure::l1_cache::L1Cache::new(1024).unwrap()),
             routing_state: Arc::new(crate::domain::models::RoutingState::new()),
@@ -938,43 +781,115 @@ mod tests {
             )),
         });
 
+        let trace_ctx = crate::domain::models::TraceContext {
+            trace_id: "test_trace".to_string(),
+            session_id: "test_session".to_string(),
+            parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: Some("exec_test".to_string()),
+            operation_id: None,
+            idempotency_key: Some("idem_test".to_string()),
+            test_scenario: None,
+        };
+
         let tool_call = ToolCall {
             id: "call_123".to_string(),
             name: "test_refund".to_string(),
             arguments: r#"{"amount":100}"#.to_string(),
         };
 
-        let op_key = generate_idempotency_key("tenant_test", "test_refund", r#"{"amount":100}"#);
+        let op_key = {
+            let mut hasher = Sha256::new();
+            hasher.update("tenant_test".as_bytes());
+            hasher.update(b"::");
+            hasher.update("idem_test".as_bytes());
+            hasher.update(b"::");
+            hasher.update("0".as_bytes());
+            hasher.update(b"::");
+            hasher.update("test_refund".as_bytes());
+            hasher.update(b"::");
+            hasher.update(r#"{"amount":100}"#.as_bytes());
+            hex::encode(hasher.finalize())
+        };
 
-        // Scenario A: OpState::Completed returns cached result
+        let exec = crate::domain::execution::ToolExecution {
+            execution_id: crate::domain::execution::ExecutionId("exec_test".to_string()),
+            operation_id: crate::domain::execution::OperationId("op_test".to_string()),
+            workflow_id: None,
+            agent_id: None,
+            tenant_id: crate::domain::execution::TenantId("tenant_test".to_string()),
+            session_id: Some(crate::domain::execution::SessionId(
+                "test_session".to_string(),
+            )),
+            tool_name: "test_refund".to_string(),
+            arguments_hash: op_key.clone(),
+            idempotency_key: crate::domain::execution::IdempotencyKey(op_key.clone()),
+            attempt: 1,
+            state: crate::domain::execution::ExecutionState::Succeeded,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Scenario A: Succeeded state returns cached result
+        let ctx = crate::domain::execution::ExecutionContext {
+            result_content: Some(r#"{"status":"refunded"}"#.to_string()),
+            latency_ms: Some(120),
+            error_message: None,
+            lease_until: None,
+            version: 1,
+        };
         operation_cache
             .insert(
                 op_key.clone(),
-                OpState::Completed {
-                    content: r#"{"status":"refunded"}"#.to_string(),
-                    latency_ms: 120,
+                crate::domain::models::OperationCacheEntry {
+                    state: crate::domain::execution::ExecutionState::Succeeded,
+                    context: ctx,
+                    execution: exec.clone(),
                 },
             )
             .await;
 
-        let results = fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        let results = fan_out(
+            vec![tool_call.clone()],
+            "tenant_test",
+            &state,
+            false,
+            &trace_ctx,
+        )
+        .await;
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
         assert_eq!(results[0].content, r#"{"status":"refunded"}"#);
         assert_eq!(results[0].latency_ms, 120);
 
-        // Scenario B: OpState::InProgress returns ALREADY_IN_FLIGHT
+        // Scenario B: Claimed/Running state returns ALREADY_IN_FLIGHT
+        let ctx_in_flight = crate::domain::execution::ExecutionContext {
+            result_content: None,
+            latency_ms: None,
+            error_message: None,
+            lease_until: Some(std::time::Instant::now() + std::time::Duration::from_secs(10)),
+            version: 1,
+        };
         operation_cache
             .insert(
                 op_key.clone(),
-                OpState::InProgress {
-                    lease_until: std::time::Instant::now() + std::time::Duration::from_secs(10),
+                crate::domain::models::OperationCacheEntry {
+                    state: crate::domain::execution::ExecutionState::Running,
+                    context: ctx_in_flight,
+                    execution: exec.clone(),
                 },
             )
             .await;
 
-        let results_in_flight =
-            fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        let results_in_flight = fan_out(
+            vec![tool_call.clone()],
+            "tenant_test",
+            &state,
+            false,
+            &trace_ctx,
+        )
+        .await;
         assert_eq!(results_in_flight.len(), 1);
         assert!(!results_in_flight[0].success);
         assert_eq!(
@@ -982,12 +897,33 @@ mod tests {
             r#"{"error":"ALREADY_IN_FLIGHT"}"#
         );
 
-        // Scenario C: OpState::Unknown blocks auto-retry
+        // Scenario C: Unknown state blocks unsafe auto-retry
+        let ctx_unknown = crate::domain::execution::ExecutionContext {
+            result_content: None,
+            latency_ms: None,
+            error_message: Some("timeout".to_string()),
+            lease_until: None,
+            version: 1,
+        };
         operation_cache
-            .insert(op_key.clone(), OpState::Unknown)
+            .insert(
+                op_key.clone(),
+                crate::domain::models::OperationCacheEntry {
+                    state: crate::domain::execution::ExecutionState::Unknown,
+                    context: ctx_unknown,
+                    execution: exec,
+                },
+            )
             .await;
 
-        let results_unknown = fan_out(vec![tool_call.clone()], "tenant_test", &state, false).await;
+        let results_unknown = fan_out(
+            vec![tool_call.clone()],
+            "tenant_test",
+            &state,
+            false,
+            &trace_ctx,
+        )
+        .await;
         assert_eq!(results_unknown.len(), 1);
         assert!(!results_unknown[0].success);
         assert_eq!(

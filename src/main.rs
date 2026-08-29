@@ -128,13 +128,24 @@ async fn main() {
     // Bounded to ~10MB to prevent RAM exhaustion. TTL = 5 minutes.
     let operation_cache = moka::future::Cache::builder()
         .max_capacity(10 * 1024 * 1024)
-        .weigher(|k: &String, v: &domain::models::OpState| -> u32 {
-            let val_size = match v {
-                domain::models::OpState::InProgress { .. } | domain::models::OpState::Unknown => 16,
-                domain::models::OpState::Completed { content, .. } => content.len(),
-            };
-            (k.len() + val_size + 64).min(u32::MAX as usize) as u32
-        })
+        .weigher(
+            |k: &String, v: &domain::models::OperationCacheEntry| -> u32 {
+                let val_size = v
+                    .context
+                    .result_content
+                    .as_ref()
+                    .map(|s| s.len())
+                    .unwrap_or(0)
+                    + v.context
+                        .error_message
+                        .as_ref()
+                        .map(|s| s.len())
+                        .unwrap_or(0)
+                    + v.execution.tool_name.len()
+                    + v.execution.arguments_hash.len();
+                (k.len() + val_size + 128).min(u32::MAX as usize) as u32
+            },
+        )
         .time_to_live(std::time::Duration::from_secs(300))
         .build();
 
@@ -227,6 +238,19 @@ async fn main() {
     let semantic_cache: Arc<dyn crate::domain::ports::SemanticCachePort> =
         Arc::new(infrastructure::oss_adapters::OssSemanticCache);
 
+    let execution_store: Arc<dyn crate::domain::ports::ExecutionStore> = Arc::new(
+        infrastructure::oss_adapters::MokaExecutionStore::new(operation_cache.clone()),
+    );
+
+    let reconciler: Arc<dyn crate::domain::ports::Reconciler> =
+        Arc::new(infrastructure::oss_adapters::OssReconciler);
+
+    let tool_transport: Arc<dyn crate::domain::ports::ToolTransport> =
+        Arc::new(infrastructure::mcp_client::McpToolTransport::new(
+            http_client.clone(),
+            mcp_registry.clone(),
+        ));
+
     let llm_api_base_url = None;
     let redis_url =
         std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -246,6 +270,9 @@ async fn main() {
         rate_limiter,
         routing_config,
         semantic_cache,
+        execution_store,
+        reconciler,
+        tool_transport,
         rate_limit_cache,
         l1_cache,
         routing_state: routing_state.clone(),

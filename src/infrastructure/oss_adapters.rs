@@ -206,3 +206,273 @@ impl SemanticCachePort for OssSemanticCache {
         })
     }
 }
+
+// ── MokaExecutionStore ────────────────────────────────────────────────────────
+
+use crate::domain::execution::{ExecutionContext, ExecutionState, IdempotencyKey, ToolExecution};
+use crate::domain::ports::{ExecutionStore, Reconciler, ReconciliationResult};
+use chrono::Utc;
+
+pub struct MokaExecutionStore {
+    pub cache: moka::future::Cache<String, crate::domain::models::OperationCacheEntry>,
+}
+
+impl MokaExecutionStore {
+    pub fn new(
+        cache: moka::future::Cache<String, crate::domain::models::OperationCacheEntry>,
+    ) -> Self {
+        Self { cache }
+    }
+}
+
+impl ExecutionStore for MokaExecutionStore {
+    fn create_or_claim<'a>(
+        &'a self,
+        execution: ToolExecution,
+        lease_duration: std::time::Duration,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(ExecutionState, ExecutionContext), GatewayError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            let key = execution.idempotency_key.0.clone();
+            let now = Utc::now();
+            let lease_until = std::time::Instant::now() + lease_duration;
+
+            if let Some(mut existing) = self.cache.get(&key).await {
+                match existing.state {
+                    ExecutionState::Succeeded => {
+                        return Ok((existing.state, existing.context));
+                    }
+                    ExecutionState::Claimed | ExecutionState::Running => {
+                        let is_lease_expired = existing
+                            .context
+                            .lease_until
+                            .map(|t| std::time::Instant::now() > t)
+                            .unwrap_or(true);
+
+                        if !is_lease_expired {
+                            return Ok((existing.state, existing.context));
+                        }
+
+                        existing.state = ExecutionState::Claimed;
+                        existing.context.version += 1;
+                        existing.context.lease_until = Some(lease_until);
+                        existing.context.error_message = Some("Lease expired".to_string());
+                        existing.execution.attempt += 1;
+                        existing.execution.state = ExecutionState::Claimed;
+                        existing.execution.updated_at = now;
+
+                        self.cache.insert(key, existing.clone()).await;
+                        return Ok((existing.state, existing.context));
+                    }
+                    ExecutionState::Failed => {
+                        existing.state = ExecutionState::Claimed;
+                        existing.context.version += 1;
+                        existing.context.lease_until = Some(lease_until);
+                        existing.execution.attempt += 1;
+                        existing.execution.state = ExecutionState::Claimed;
+                        existing.execution.updated_at = now;
+
+                        self.cache.insert(key, existing.clone()).await;
+                        return Ok((existing.state, existing.context));
+                    }
+                    ExecutionState::Unknown => {
+                        return Ok((existing.state, existing.context));
+                    }
+                    ExecutionState::Pending | ExecutionState::Reconciling => {
+                        return Ok((existing.state, existing.context));
+                    }
+                }
+            }
+
+            let context = ExecutionContext {
+                result_content: None,
+                latency_ms: None,
+                error_message: None,
+                lease_until: Some(lease_until),
+                version: 1,
+            };
+
+            let mut exec = execution;
+            exec.state = ExecutionState::Claimed;
+            exec.created_at = now;
+            exec.updated_at = now;
+
+            let new_entry = crate::domain::models::OperationCacheEntry {
+                state: ExecutionState::Claimed,
+                context: context.clone(),
+                execution: exec,
+            };
+
+            let entry = self.cache.get_with(key, async { new_entry }).await;
+            Ok((entry.state, entry.context))
+        })
+    }
+
+    fn get<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<(ExecutionState, ExecutionContext, ToolExecution)>,
+                        GatewayError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if let Some(entry) = self.cache.get(&idempotency_key.0).await {
+                Ok(Some((entry.state, entry.context, entry.execution)))
+            } else {
+                Ok(None)
+            }
+        })
+    }
+
+    fn mark_running<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
+                if entry.context.version == version {
+                    entry.state = ExecutionState::Running;
+                    entry.execution.state = ExecutionState::Running;
+                    entry.execution.updated_at = Utc::now();
+                    self.cache.insert(idempotency_key.0.clone(), entry).await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_succeeded<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+        content: String,
+        latency_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
+                if entry.context.version == version {
+                    entry.state = ExecutionState::Succeeded;
+                    entry.context.result_content = Some(content);
+                    entry.context.latency_ms = Some(latency_ms);
+                    entry.execution.state = ExecutionState::Succeeded;
+                    entry.execution.updated_at = Utc::now();
+                    self.cache.insert(idempotency_key.0.clone(), entry).await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_failed<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+        reason: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
+                if entry.context.version == version {
+                    entry.state = ExecutionState::Failed;
+                    entry.context.error_message = Some(reason);
+                    entry.execution.state = ExecutionState::Failed;
+                    entry.execution.updated_at = Utc::now();
+                    self.cache.insert(idempotency_key.0.clone(), entry).await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn mark_unknown<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
+                if entry.context.version == version {
+                    entry.state = ExecutionState::Unknown;
+                    entry.execution.state = ExecutionState::Unknown;
+                    entry.execution.updated_at = Utc::now();
+                    self.cache.insert(idempotency_key.0.clone(), entry).await;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn transition<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        from: ExecutionState,
+        to: ExecutionState,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
+                if entry.state == from && entry.context.version == version {
+                    entry.state = to;
+                    entry.execution.state = to;
+                    entry.execution.updated_at = Utc::now();
+                    self.cache.insert(idempotency_key.0.clone(), entry).await;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+// ── OssReconciler ────────────────────────────────────────────────────────────
+
+pub struct OssReconciler;
+
+impl Reconciler for OssReconciler {
+    fn reconcile<'a>(
+        &'a self,
+        _operation: &'a ToolExecution,
+    ) -> Pin<Box<dyn Future<Output = Result<ReconciliationResult, GatewayError>> + Send + 'a>> {
+        Box::pin(async { Ok(ReconciliationResult::StillUnknown) })
+    }
+}
+
+// ── OssToolTransport ──────────────────────────────────────────────────────────
+
+pub struct OssToolTransport;
+
+impl crate::domain::ports::ToolTransport for OssToolTransport {
+    fn execute_tool<'a>(
+        &'a self,
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        _arguments: &'a str,
+        _tenant_id: &'a str,
+        _enable_compression: bool,
+        _test_scenario: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = crate::infrastructure::mcp_client::ToolResult> + Send + 'a>>
+    {
+        let cid = tool_call_id.to_string();
+        let name = tool_name.to_string();
+        Box::pin(async move {
+            crate::infrastructure::mcp_client::ToolResult {
+                tool_call_id: cid,
+                name,
+                content: "mock result".to_string(),
+                latency_ms: 0,
+                success: true,
+            }
+        })
+    }
+}

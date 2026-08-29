@@ -652,6 +652,13 @@ mod tests {
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
             routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
             semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            execution_store: Arc::new(
+                crate::infrastructure::oss_adapters::MokaExecutionStore::new(
+                    moka::future::Cache::builder().build(),
+                ),
+            ),
+            reconciler: Arc::new(crate::infrastructure::oss_adapters::OssReconciler),
+            tool_transport: Arc::new(crate::infrastructure::oss_adapters::OssToolTransport),
             rate_limit_cache: Arc::new(dashmap::DashMap::new()),
             l1_cache: Arc::new(L1Cache::new(1024).unwrap()),
             routing_state: Arc::new(RoutingState::new()),
@@ -970,6 +977,13 @@ mod tests {
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
             routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
             semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            execution_store: Arc::new(
+                crate::infrastructure::oss_adapters::MokaExecutionStore::new(
+                    moka::future::Cache::builder().build(),
+                ),
+            ),
+            reconciler: Arc::new(crate::infrastructure::oss_adapters::OssReconciler),
+            tool_transport: Arc::new(crate::infrastructure::oss_adapters::OssToolTransport),
             rate_limit_cache: Arc::new(dashmap::DashMap::new()),
             l1_cache: Arc::new(L1Cache::new(1024).unwrap()),
             routing_state: Arc::new(RoutingState::new()),
