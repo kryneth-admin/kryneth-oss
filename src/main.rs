@@ -245,12 +245,11 @@ async fn main() {
     let reconciler: Arc<dyn crate::domain::ports::Reconciler> =
         Arc::new(infrastructure::oss_adapters::OssReconciler);
 
-    let tool_transport: Arc<dyn crate::domain::ports::ToolTransport> = Arc::new(
-        infrastructure::mcp_client::McpToolTransport::new(
+    let tool_transport: Arc<dyn crate::domain::ports::ToolTransport> =
+        Arc::new(infrastructure::mcp_client::McpToolTransport::new(
             http_client.clone(),
             mcp_registry.clone(),
-        ),
-    );
+        ));
 
     let llm_api_base_url = None;
     let redis_url =

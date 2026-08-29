@@ -175,6 +175,7 @@ pub enum ReconciliationResult {
     StillUnknown,
 }
 
+#[allow(clippy::type_complexity)]
 pub trait ExecutionStore: Send + Sync {
     fn create_or_claim<'a>(
         &'a self,

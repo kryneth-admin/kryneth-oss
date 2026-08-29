@@ -792,13 +792,11 @@ pub async fn execute_proxy(
         None
     };
 
-    let semantic_cache_enabled =
-        client_config.semantic_cache_enabled && test_scenario.is_none();
+    let semantic_cache_enabled = client_config.semantic_cache_enabled && test_scenario.is_none();
 
     let cache_future = {
         let embedding_vector = embedding_vector.clone();
         let semantic_text = semantic_text.clone();
-        let semantic_cache_enabled = semantic_cache_enabled;
         async move {
             if !semantic_cache_enabled {
                 return None;
