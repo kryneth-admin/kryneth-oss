@@ -142,61 +142,74 @@ To solve this, Kryneth implements a **Two-Phase Semantic Lazy Schema Loading** s
 
 ---
 
-## 7. Semantic MCP Idempotency & Safe Retry Engine
+## 7. Agent Tool-Execution Safety & Idempotency Layer
 
-In high-velocity autonomous agent workflows, network blips, LLM retries, or execution timeouts can cause an agent to re-issue identical tool calls. Without strict idempotency controls, executing non-idempotent tool mutations (such as processing refunds, placing trades, or modifying database records) twice risks financial loss or state corruption.
+In high-velocity autonomous agent workflows, network blips, LLM retries, or execution timeouts can cause an agent to re-issue identical tool calls. Executing non-idempotent tool mutations (such as processing refunds, placing trades, or modifying database records) twice risks financial loss or state corruption.
 
-Kryneth Gateway incorporates an in-memory **Semantic MCP Idempotency & Safe Retry Engine** to guarantee exact-once tool execution semantics across active sessions.
+Kryneth Gateway incorporates a production-grade **Agent Tool-Execution Safety & Idempotency Layer** built on Ports & Adapters architecture to guarantee exact-once tool execution semantics across active agent sessions.
 
 ```mermaid
-sequenceDiagram
-    participant Agent as Autonomous LLM Agent
-    participant GW as Kryneth Gateway
-    participant Cache as Operation Cache (Moka)
-    participant MCP as Downstream MCP Server
+graph TD
+    subgraph Client Identity & Context
+        A[Trace Context Middleware] -->|Headers: X-Execution-ID, X-Idempotency-Key| B[TraceContext]
+    end
 
-    Agent->>GW: Tool Call: process_refund(amount=100)
-    Note over GW: generate_idempotency_key()<br/>BTreeMap key sorting + Sha256
-    GW->>Cache: Moka get_with(op_key)
-    alt Vacant Key (First Attempt)
-        Cache-->>GW: Acquire Lease (InProgress: 10s)
-        GW->>MCP: Dispatch tool call (Detached Tokio Task)
-        MCP-->>GW: Return success payload
-        GW->>Cache: Insert Completed { content, latency_ms }
-        GW-->>Agent: Return tool result
-    else Cache Hit (Completed)
-        Cache-->>GW: Return cached Completed state
-        GW-->>Agent: Return cached result (0ms upstream)
-    else In Flight / Unknown (Lockout)
-        Cache-->>GW: InProgress (<10s) or Unknown (Expired/Failed)
-        GW-->>Agent: Error: PREVIOUS_ATTEMPT_UNKNOWN / ALREADY_IN_FLIGHT
+    subgraph Usecase Layer
+        B --> C[ExecutionService::execute_tool]
+    end
+
+    subgraph Domain Ports
+        C --> D[ExecutionStore Port]
+        C --> E[ToolTransport Port]
+        C --> F[Reconciler Port]
+    end
+
+    subgraph Infrastructure Adapters
+        D -->|Moka Fencing CAS| G[MokaExecutionStore]
+        E -->|Outbound HTTP POST| H[McpToolTransport]
+        F -->|State Recovery| I[OssReconciler]
     end
 ```
 
-### Deep Canonicalization (`generate_idempotency_key`)
-To prevent minor formatting variations (such as reordered JSON key-value pairs) from evading idempotency detection, Kryneth applies deep structural canonicalization:
-* **Key Sorting via `BTreeMap`**: The `canonicalize_json` helper recursively converts JSON objects into sorted `BTreeMap` representations.
-* **Deterministic Hashing**: Computes a SHA-256 hash over the canonical key string:
-  $$\text{IdempotencyKey} = \text{SHA-256}(\text{tenant\_id} \parallel \text{"::"} \parallel \text{tool\_name} \parallel \text{"::"} \parallel \text{canonical\_args\_json})$$
+### 1. 5-Tier Execution Identity & Deep Canonicalization
+To distinguish between full agent workflows, specific tool execution steps, and business idempotency keys, Kryneth establishes a 5-tier execution identity:
 
-### The `OpState` State Machine & Stampede Prevention
-Kryneth tracks pending and completed tool operations in `AppState::operation_cache` using the `OpState` enum:
+- **`ExecutionId` (`X-Execution-ID`)**: Identifies a full agent/workflow task run.
+- **`OperationId` (`X-Operation-ID`)**: Identifies a single logical tool step inside an execution.
+- **`Attempt` (`attempt`)**: Tracks auto-retry attempt counts.
+- **`IdempotencyKey` (`X-Idempotency-Key`)**: Distinct business deduplication key.
+- **`WorkflowId` / `AgentId` (`X-Workflow-ID` / `X-Agent-ID`)**: Parent workflow and agent identifiers for telemetry correlation.
+
+#### Deterministic Canonical Hashing
+$$\text{IdempotencyKeyHash} = \text{SHA-256}(\text{tenant\_id} \parallel \text{"::"} \parallel \text{key} \parallel \text{"::"} \parallel \text{tool\_index} \parallel \text{"::"} \parallel \text{tool\_name} \parallel \text{"::"} \parallel \text{canonical\_args})$$
+
+Where `canonicalize_json` recursively converts JSON objects to sorted `BTreeMap` representations to eliminate formatting variations.
+
+### 2. Versioned `ExecutionState` Machine & Concurrency Fencing
+
+Tool execution claims transition through a versioned state machine in `ExecutionStore`:
 
 ```rust
-pub enum OpState {
-    InProgress { lease_until: std::time::Instant },
-    Completed { content: String, latency_ms: u64 },
+pub enum ExecutionState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
     Unknown,
 }
 ```
 
-* **TOCTOU Thundering Herd Lock (`Moka get_with`)**: When a tool call arrives, Kryneth invokes Moka's atomic `.get_with()` async closure. If vacant, the current thread atomically acquires a **10-second lease lock** (`OpState::InProgress`). Concurrent duplicate requests arriving while the operation is in flight receive an immediate `{"error":"ALREADY_IN_FLIGHT"}` response without hitting downstream MCP servers.
-* **Detached Task Execution**: The actual tool invocation runs inside a detached `tokio::spawn` task. Even if the client disconnects or times out at the HTTP level, the background task completes, saving the `OpState::Completed` result for subsequent agent retries.
+* **Versioned Fencing (CAS)**: State transitions require optimistic version matching (`version + 1`). Late completions with stale version numbers are fenced out.
+* **Concurrent Duplicate Lockout**: When duplicate calls arrive while an execution is `Running`, Kryneth returns `{"error":"ALREADY_IN_FLIGHT"}` without dispatching duplicate requests to downstream MCP servers.
 
-### Safe Retry Lockout & LLM Hallucination Guard
-If a prior tool execution timed out or panicked, its state resolves to `OpState::Unknown` (or its lease lock expires). 
-* **Safe Retry Lockout**: When an agent attempts to re-execute a tool whose state is `Unknown`, Kryneth returns `{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}` rather than re-running the tool. This prevents secondary non-idempotent side effects when state is uncertain.
-* **LLM Hallucination Guard**: Kryneth's response formatter explicitly filters raw retry error strings before constructing the final prompt context, preventing LLM reasoning loops from hallucinating fake database states or repeating failed actions based on internal gateway error payloads.
+### 3. Tool Policy & Unsafe Retry Prevention
+
+Every tool is resolved against a policy engine (`ToolExecutionPolicy`):
+- **Read-Only Tools (`get_*`, `read_*`, `search_*`)**: Resolved as `RetryPolicy::Safe` — retries allowed.
+- **Mutating Tools (`charge_*`, `execute_sql`, etc.)**: Resolved as `RetryPolicy::Unsafe` with `SideEffectClass::Irreversible`.
+
+#### Unsafe Retry Guard
+If a prior execution of a mutating tool ended in `ExecutionState::Unknown` (due to timeout or transport disconnect), subsequent retries with the same idempotency key are **blocked** immediately (`{"error":"PREVIOUS_ATTEMPT_UNKNOWN"}`) unless `Reconciler` recovers the state.
 
 ---
 
