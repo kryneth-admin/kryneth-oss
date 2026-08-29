@@ -437,6 +437,14 @@ pub async fn get_live_metrics(
         .dashboard_metrics
         .blocked_agent_loops
         .load(std::sync::atomic::Ordering::Relaxed);
+    let mcp_already_in_flight_blocked = state
+        .dashboard_metrics
+        .mcp_already_in_flight_blocked
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mcp_previous_attempt_unknown_blocked = state
+        .dashboard_metrics
+        .mcp_previous_attempt_unknown_blocked
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let avg_latency = if requests > 0 {
         latency as f64 / requests as f64
@@ -449,6 +457,8 @@ pub async fn get_live_metrics(
         "avg_latency_ms": avg_latency,
         "total_tokens": tokens,
         "blocked_agent_loops": blocked,
+        "mcp_already_in_flight_blocked": mcp_already_in_flight_blocked,
+        "mcp_previous_attempt_unknown_blocked": mcp_previous_attempt_unknown_blocked,
         "timestamp": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()

@@ -792,11 +792,13 @@ pub async fn execute_proxy(
         None
     };
 
+    let semantic_cache_enabled =
+        client_config.semantic_cache_enabled && test_scenario.is_none();
+
     let cache_future = {
         let embedding_vector = embedding_vector.clone();
         let semantic_text = semantic_text.clone();
-        let semantic_cache_enabled =
-            client_config.semantic_cache_enabled && test_scenario.is_none();
+        let semantic_cache_enabled = semantic_cache_enabled;
         async move {
             if !semantic_cache_enabled {
                 return None;
@@ -1084,7 +1086,7 @@ pub async fn execute_proxy(
             body_bytes.clone(),
             is_free_tier,
             embedding_vector,
-            client_config.semantic_cache_enabled,
+            semantic_cache_enabled,
             team_id,
             api_key_alias,
             agent_loops,
@@ -1109,7 +1111,7 @@ pub async fn execute_proxy(
         success_key_alias,
         is_free_tier,
         embedding_vector,
-        client_config.semantic_cache_enabled,
+        semantic_cache_enabled,
         enable_compression,
         req_extensions,
     )
@@ -1672,11 +1674,27 @@ async fn handle_buffered_response(
                 crate::infrastructure::mcp_client::extract_tool_calls(&body_bytes, &*adapter);
 
             if !calls.is_empty() {
+                let trace_ctx = req_extensions
+                    .get::<crate::domain::models::TraceContext>()
+                    .cloned()
+                    .unwrap_or_else(|| crate::domain::models::TraceContext {
+                        trace_id: uuid::Uuid::new_v4().to_string(),
+                        session_id: uuid::Uuid::new_v4().to_string(),
+                        parent_trace_id: None,
+                        workflow_id: None,
+                        agent_id: None,
+                        execution_id: None,
+                        operation_id: None,
+                        idempotency_key: None,
+                        test_scenario: None,
+                    });
+
                 let results = crate::infrastructure::mcp_client::fan_out(
                     calls,
                     tenant_id,
                     state,
                     enable_compression,
+                    &trace_ctx,
                 )
                 .await;
 
@@ -2486,6 +2504,13 @@ mod tests {
             rate_limiter: Arc::new(crate::infrastructure::oss_adapters::OssRateLimit),
             routing_config: Arc::new(crate::infrastructure::oss_adapters::OssRoutingConfig),
             semantic_cache: Arc::new(crate::infrastructure::oss_adapters::OssSemanticCache),
+            execution_store: Arc::new(
+                crate::infrastructure::oss_adapters::MokaExecutionStore::new(
+                    moka::future::Cache::builder().build(),
+                ),
+            ),
+            reconciler: Arc::new(crate::infrastructure::oss_adapters::OssReconciler),
+            tool_transport: Arc::new(crate::infrastructure::oss_adapters::OssToolTransport),
             rate_limit_cache: Arc::new(dashmap::DashMap::new()),
             l1_cache,
             routing_state,
@@ -2591,6 +2616,12 @@ mod tests {
             trace_id: "t1".to_string(),
             session_id: "s1".to_string(),
             parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: None,
+            operation_id: None,
+            idempotency_key: None,
+            test_scenario: None,
         };
 
         let result = execute_proxy(
@@ -2660,6 +2691,12 @@ mod tests {
             trace_id: "t2".to_string(),
             session_id: "s2".to_string(),
             parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: None,
+            operation_id: None,
+            idempotency_key: None,
+            test_scenario: None,
         };
 
         // If high-load bypass is NOT working, this call will fail because compliance service is not mocked.
@@ -3070,6 +3107,12 @@ mod tests {
             trace_id: "t_cache_1".to_string(),
             session_id: "s_cache_1".to_string(),
             parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: None,
+            operation_id: None,
+            idempotency_key: None,
+            test_scenario: None,
         };
 
         let result = handle_cache_hit(
@@ -3165,6 +3208,12 @@ mod tests {
             trace_id: "t_cache_2".to_string(),
             session_id: "s_cache_2".to_string(),
             parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: None,
+            operation_id: None,
+            idempotency_key: None,
+            test_scenario: None,
         };
 
         let result = handle_cache_hit(

@@ -38,6 +38,8 @@ jobs:
           ulimit -n 65536 || true
           export RUST_LOG=debug
           export RUST_BACKTRACE=1
+          export SANDBOX_FALLBACK_MODE=open
+          export MCP_TOOL_REGISTRY='{"mock_tool":"http://localhost:8090/sse","execute_sql":"http://localhost:8090/mcp"}'
           COMPLIANCE_URL=http://localhost:8090 ROUTING_CONFIG_PATH=routing.bench.yaml \
             cargo run --release > gateway.log 2>&1 & echo $! > gateway.pid
 
@@ -107,6 +109,13 @@ jobs:
           k6 run tests/load/mcp_fanout_benchmark.js >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
 
+      - name: Run Idempotency & Re-execution Benchmark
+        run: |
+          echo "## Idempotency & Re-execution Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          k6 run tests/load/idempotency_dedup_benchmark.js >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
       - name: Print Summary Table
         run: |
           echo "## Benchmark Execution Summary" >> $GITHUB_STEP_SUMMARY
@@ -118,6 +127,7 @@ jobs:
           echo "| Mixed Workload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
           echo "| Dynamic Payload | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
           echo "| MCP Fanout | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Idempotency Dedup | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
 
       - name: Dump logs on failure or completion
         if: always()

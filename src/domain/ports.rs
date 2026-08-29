@@ -162,3 +162,98 @@ pub trait SemanticCachePort: Send + Sync {
         vector: &'a [f32],
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
+
+// ── Execution safety ports ──────────────────────────────────────────────────
+
+use crate::domain::execution::{ExecutionContext, ExecutionState, IdempotencyKey, ToolExecution};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReconciliationResult {
+    Succeeded { content: String },
+    Failed { reason: String },
+    StillUnknown,
+}
+
+pub trait ExecutionStore: Send + Sync {
+    fn create_or_claim<'a>(
+        &'a self,
+        execution: ToolExecution,
+        lease_duration: std::time::Duration,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = Result<(ExecutionState, ExecutionContext), GatewayError>>
+                + Send
+                + 'a,
+        >,
+    >;
+
+    fn get<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<
+                        Option<(ExecutionState, ExecutionContext, ToolExecution)>,
+                        GatewayError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    >;
+
+    fn mark_running<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+
+    fn mark_succeeded<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+        content: String,
+        latency_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+
+    fn mark_failed<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+        reason: String,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+
+    fn mark_unknown<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+
+    fn transition<'a>(
+        &'a self,
+        idempotency_key: &'a IdempotencyKey,
+        from: ExecutionState,
+        to: ExecutionState,
+        version: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>>;
+}
+
+pub trait Reconciler: Send + Sync {
+    fn reconcile<'a>(
+        &'a self,
+        operation: &'a ToolExecution,
+    ) -> Pin<Box<dyn Future<Output = Result<ReconciliationResult, GatewayError>> + Send + 'a>>;
+}
+
+pub trait ToolTransport: Send + Sync {
+    fn execute_tool<'a>(
+        &'a self,
+        tool_call_id: &'a str,
+        tool_name: &'a str,
+        arguments: &'a str,
+        tenant_id: &'a str,
+        enable_compression: bool,
+        test_scenario: Option<&'a str>,
+    ) -> Pin<Box<dyn Future<Output = crate::infrastructure::mcp_client::ToolResult> + Send + 'a>>;
+}

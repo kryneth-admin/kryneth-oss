@@ -544,7 +544,105 @@ async function t50_healthEndpointCheck() {
   return res.status === 200 && data.status === 'ok';
 }
 
+async function t51_executionSafetyConcurrent() {
+  const executionId = `exec-concurrent-51-${Date.now()}`;
+  const idempotencyKey = `idem-concurrent-51-${Date.now()}`;
+
+  const req1 = fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`,
+      'X-Execution-ID': executionId,
+      'X-Idempotency-Key': idempotencyKey,
+      'X-Workflow-ID': 'wf-concurrent-51',
+      'X-Agent-ID': 'ag-concurrent-51',
+    },
+    body: JSON.stringify({ model: 'agentic-test-model', messages: [{ role: 'user', content: 'What is the stock price of AMZN?' }] }),
+  });
+
+  const req2 = fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`,
+      'X-Execution-ID': executionId,
+      'X-Idempotency-Key': idempotencyKey,
+      'X-Workflow-ID': 'wf-concurrent-51',
+      'X-Agent-ID': 'ag-concurrent-51',
+    },
+    body: JSON.stringify({ model: 'agentic-test-model', messages: [{ role: 'user', content: 'What is the stock price of AMZN?' }] }),
+  });
+
+  const [r1, r2] = await Promise.all([req1, req2]);
+  return r1.status === 200 && r2.status === 200;
+}
+
+async function t52_unsafeRetryPrevention() {
+  const executionId = `exec-retry-52-${Date.now()}`;
+  const idempotencyKey = `idem-retry-52-${Date.now()}`;
+
+  // Fetch initial blocked-retry counter
+  const metrics1 = await fetch(`http://localhost:8080/v1/admin/metrics/live`, {
+    headers: { Authorization: `Bearer ${API_KEY}` }
+  }).then(r => r.json());
+  const initialBlockedCount = metrics1.mcp_previous_attempt_unknown_blocked || 0;
+
+  // Step 1: Send a NON-STREAMING buffered request with 'execute-sql-json' scenario.
+  // The mock returns a proper JSON chat.completion body (not SSE), so
+  // handle_buffered_response can parse tool_calls and dispatch fan_out.
+  // ExecutionService calls /mcp/messages with X-Test-Scenario: mcp-timeout,
+  // the mock sleeps 10s, the 5s policy timeout fires → state = Unknown.
+  await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`,
+      'X-Execution-ID': executionId,
+      'X-Idempotency-Key': idempotencyKey,
+      'X-Workflow-ID': 'wf-retry-52',
+      'X-Agent-ID': 'ag-retry-52',
+      'X-Test-Scenario': 'execute-sql-json',  // LLM mock returns buffered JSON with execute_sql tool_calls
+    },
+    body: JSON.stringify({
+      model: 'agentic-test-model',
+      stream: false,  // Force buffered path so handle_buffered_response runs fan_out
+      messages: [{ role: 'user', content: `run sql idempotent test ${Date.now()}` }],
+    }),
+  });
+
+  // Step 2: Retry with SAME execution identity + idempotency key, NO test scenario
+  // (so the MCP call would go through normally, but execution_service sees Unknown state
+  // from Step 1 and blocks it → increments mcp_previous_attempt_unknown_blocked).
+  await fetch(`${GATEWAY_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${API_KEY}`,
+      'X-Execution-ID': executionId,
+      'X-Idempotency-Key': idempotencyKey,
+      'X-Workflow-ID': 'wf-retry-52',
+      'X-Agent-ID': 'ag-retry-52',
+      'X-Test-Scenario': 'execute-sql-json',  // same JSON body so fan_out fires again
+    },
+    body: JSON.stringify({
+      model: 'agentic-test-model',
+      stream: false,
+      messages: [{ role: 'user', content: `run sql idempotent test ${Date.now()}` }],
+    }),
+  });
+
+  // Fetch final counter — must have increased by 1
+  const metrics2 = await fetch("http://localhost:8080/v1/admin/metrics/live", {
+    headers: { Authorization: `Bearer ${API_KEY}` }
+  }).then(r => r.json());
+  const finalBlockedCount = metrics2.mcp_previous_attempt_unknown_blocked || 0;
+
+  return finalBlockedCount > initialBlockedCount;
+}
+
 // ---------------------------------------------------------------------------
+
 // Main Suite Runner (Safe Happy-Path First, Destructive Chaos Last)
 // ---------------------------------------------------------------------------
 async function runFull50ScenarioSuite() {
@@ -594,6 +692,8 @@ async function runFull50ScenarioSuite() {
     [48, 'Max Tokens Option Forwarding', t48_maxTokensForwarding],
     [49, 'Stop Sequences Array Parsing', t49_stopSequencesArray],
     [50, 'Upstream Mock Server Health Check', t50_healthEndpointCheck],
+    [51, 'Execution Safety Layer - Concurrent Tool Executions', t51_executionSafetyConcurrent],
+    [52, 'Unsafe Retry Prevention', t52_unsafeRetryPrevention],
     // Destructive / Chaos Rate Limit / Failover tests placed at end
     [21, 'Upstream Mid-Stream Abort Resiliency', t21_midStreamCrashResilience],
     [22, 'Circuit-Breaker Hot-Swap Failover', t22_circuitBreakerHotSwap],

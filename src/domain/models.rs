@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::domain::execution::{ExecutionContext, ExecutionState, ToolExecution};
 use crate::domain::ports::{
     AuthPort, BillingPort, RateLimitPort, RoutingConfigPort, SemanticCachePort, TelemetryPort,
 };
@@ -13,6 +14,13 @@ pub enum OpState {
     InProgress { lease_until: std::time::Instant },
     Completed { content: String, latency_ms: u64 },
     Unknown,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OperationCacheEntry {
+    pub state: ExecutionState,
+    pub context: ExecutionContext,
+    pub execution: ToolExecution,
 }
 
 /// Application-wide shared state passed to every handler via Axum's `State` extractor.
@@ -59,7 +67,11 @@ pub struct AppState {
     /// OSS Agent Guardian cache for Tool Storms and Runaway Loops.
     pub agent_guardian_cache: moka::future::Cache<String, u32>,
     /// Semantic MCP Idempotency & Safe-Retry operation cache.
-    pub operation_cache: moka::future::Cache<String, OpState>,
+    pub operation_cache: moka::future::Cache<String, OperationCacheEntry>,
+    // ── Dependency-inverted execution ports ───────────────────────────────────
+    pub execution_store: Arc<dyn crate::domain::ports::ExecutionStore>,
+    pub reconciler: Arc<dyn crate::domain::ports::Reconciler>,
+    pub tool_transport: Arc<dyn crate::domain::ports::ToolTransport>,
     /// Ephemeral Admin Dashboard in-memory metrics.
     pub dashboard_metrics: std::sync::Arc<DashboardMetrics>,
     /// Dynamic pricing map for dynamic token & tool pricing rules
@@ -116,6 +128,12 @@ pub struct TraceContext {
     pub trace_id: String,
     pub session_id: String,
     pub parent_trace_id: Option<String>,
+    pub workflow_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub execution_id: Option<String>,
+    pub operation_id: Option<String>,
+    pub idempotency_key: Option<String>,
+    pub test_scenario: Option<String>,
 }
 
 /// Strongly-typed payload for telemetry ingestion to guarantee valid JSON serialization.
