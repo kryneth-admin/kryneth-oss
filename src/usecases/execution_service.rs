@@ -297,8 +297,11 @@ impl ExecutionService {
                     )
                     .await;
             } else {
-                let is_timeout =
-                    res.content.contains("MCP_TIMEOUT") || res.content.contains("unreachable");
+                let is_timeout = res.content.contains("MCP_TIMEOUT")
+                    || res.content.contains("unreachable")
+                    || res.content.contains("not configured")
+                    || res.content.contains("timed out")
+                    || res.content.contains("timeout");
                 if is_timeout {
                     let _ = state_task
                         .execution_store
@@ -356,7 +359,12 @@ impl ExecutionService {
         let final_state = if result.success {
             ExecutionState::Succeeded
         } else {
-            if result.content.contains("MCP_TIMEOUT") {
+            if result.content.contains("MCP_TIMEOUT")
+                || result.content.contains("unreachable")
+                || result.content.contains("not configured")
+                || result.content.contains("timed out")
+                || result.content.contains("timeout")
+            {
                 ExecutionState::Unknown
             } else {
                 ExecutionState::Failed

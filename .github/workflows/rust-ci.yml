@@ -220,6 +220,7 @@ jobs:
         JWT_SECRET: "dummy_ci_secret_key_32_bytes_long_1234567890"
         APP_ENV: "development"
         SANDBOX_FALLBACK_MODE: "open"
+        MCP_TOOL_REGISTRY: '{"search_repositories":"http://localhost:9090/sse","get_file_contents":"http://localhost:9090/sse","execute_sql":"http://localhost:9090/mcp"}'
       run: |
         nohup ./target/debug/kryneth_gateway > gateway.log 2>&1 &
         echo "Waiting for Kryneth AI Gateway health on port 8080..."
