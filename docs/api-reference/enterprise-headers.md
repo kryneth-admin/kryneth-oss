@@ -38,6 +38,30 @@ These headers allow client applications and internal microservices to control an
 -   **Description**: Flags compliance and proxy layers to inject artificial delays, synthetic failures, or payload drops. Used to validate downstream system resilience and circuit-breaker recovery.
 -   **Example**: `x-kryneth-chaos: 1`
 
+### `X-Execution-ID`
+-   **Type**: `String`
+-   **Requirement**: **Optional** (auto-generated if missing)
+-   **Description**: Unique identifier for a full agent or multi-step workflow execution run. Used by `ExecutionService` to group tool invocations.
+-   **Example**: `X-Execution-ID: exec-run-9482`
+
+### `X-Operation-ID`
+-   **Type**: `String`
+-   **Requirement**: **Optional** (auto-derived if missing)
+-   **Description**: Unique identifier for a single tool call operation inside an agent execution.
+-   **Example**: `X-Operation-ID: op-step-12`
+
+### `X-Idempotency-Key`
+-   **Type**: `String`
+-   **Requirement**: **Optional** (enables exact-once deduplication)
+-   **Description**: Business idempotency key used by the `ExecutionService` to canonicalize tool parameters and prevent duplicate executions or unsafe retries.
+-   **Example**: `X-Idempotency-Key: idem-refund-10023`
+
+### `X-Workflow-ID` / `X-Agent-ID`
+-   **Type**: `String`
+-   **Requirement**: **Optional**
+-   **Description**: Identifiers correlating parent workflows and autonomous agent instances in execution traces and telemetry.
+-   **Example**: `X-Workflow-ID: wf-payment-flow`, `X-Agent-ID: ag-billing-bot`
+
 ---
 
 ## 2. Enterprise Response Headers

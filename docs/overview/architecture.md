@@ -27,7 +27,9 @@ graph TD
         
         LLMRouter --> Upstream((OpenAI / Anthropic / Gemini))
         Upstream --> MCPSandbox[MCP Sandbox & Tool Firewall]
-        MCPSandbox --> Compliance[Compliance Redaction]
+        MCPSandbox --> ExecService[ExecutionService: Idempotency & Safety Layer]
+        ExecService -->|McpToolTransport| MCPDownstream((MCP Tools / Services))
+        ExecService --> Compliance[Compliance Redaction]
         Compliance --> Outgress
     end
     

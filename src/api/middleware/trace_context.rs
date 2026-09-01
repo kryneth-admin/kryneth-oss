@@ -35,10 +35,46 @@ pub async fn trace_context_middleware(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    let workflow_id = headers
+        .get("x-workflow-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let agent_id = headers
+        .get("x-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let execution_id = headers
+        .get("x-execution-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let operation_id = headers
+        .get("x-operation-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let idempotency_key = headers
+        .get("x-idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    let test_scenario = headers
+        .get("x-test-scenario")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     let ctx = TraceContext {
         trace_id: trace_id.clone(),
         session_id: session_id.clone(),
         parent_trace_id,
+        workflow_id,
+        agent_id,
+        execution_id,
+        operation_id,
+        idempotency_key,
+        test_scenario,
     };
 
     // Inject into request extensions so handlers can access it

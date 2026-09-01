@@ -246,6 +246,51 @@ async def generate_sse_stock_price_tool_call():
 
     yield "data: [DONE]\n\n"
 
+async def generate_sse_sql_tool_call():
+    """Generates an SSE stream containing a execute_sql tool call invocation."""
+    chunks = [
+        {
+            "id": "chatcmpl-mock-tc-sql",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_sql_1",
+                                "type": "function",
+                                "function": {
+                                    "name": "execute_sql",
+                                    "arguments": '{"query": "INSERT INTO users VALUES (1)"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {
+            "id": "chatcmpl-mock-tc-sql",
+            "object": "chat.completion.chunk",
+            "created": 1700000000,
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+        },
+    ]
+
+    for chunk in chunks:
+        yield f"data: {json.dumps(chunk)}\n\n"
+        await asyncio.sleep(0.05)
+
+    yield "data: [DONE]\n\n"
+
 async def generate_sse_stock_price_final():
     """Generates final SSE stream text for stock price tool result."""
     chunks = [
@@ -359,6 +404,43 @@ async def chat_completions(
                 }
             }
         )
+    if scenario == "execute-sql-json":
+        logger.info("Returning static (buffered) execute-sql-json response for MCP fan-out testing")
+        return JSONResponse(
+            status_code=200,
+            content={
+                "id": "chatcmpl-mock-tc-sql-json",
+                "object": "chat.completion",
+                "created": 1700000000,
+                "model": "gpt-4o",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_sql_json_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "execute_sql",
+                                        "arguments": "{\"query\": \"INSERT INTO users VALUES (1)\"}"
+                                    }
+                                }
+                            ]
+                        },
+                        "finish_reason": "tool_calls"
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 12,
+                    "total_tokens": 22
+                }
+            }
+        )
+
 
     if scenario == "deepseek-thinking":
         logger.info("Starting DeepSeek reasoning thinking scenario stream")
@@ -393,6 +475,14 @@ async def chat_completions(
                     logger.info("Stateful trigger: User asked for AMZN stock price -> Returning web_search tool_calls SSE")
                     return StreamingResponse(
                         generate_sse_stock_price_tool_call(),
+                        media_type="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+                    )
+
+                if role == "user" and "run sql" in content_str.lower():
+                    logger.info("Stateful trigger: User asked for run sql -> Returning execute_sql tool_calls SSE")
+                    return StreamingResponse(
+                        generate_sse_sql_tool_call(),
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
                     )
@@ -521,8 +611,8 @@ async def mcp_messages(
     scenario = (x_test_scenario or "").strip().lower()
     logger.info(f"Incoming /mcp/messages request with scenario: '{scenario}'")
 
-    if scenario == "mcp-timeout":
-        logger.warning("Simulating MCP timeout: sleeping for 10 seconds (exceeds Kryneth 5s firewall)...")
+    if scenario in ["mcp-timeout", "execute-sql-json"]:
+        logger.warning(f"Simulating MCP timeout ({scenario}): sleeping for 10 seconds (exceeds Kryneth 5s firewall)...")
         await asyncio.sleep(10)
         return JSONResponse(
             status_code=200,
