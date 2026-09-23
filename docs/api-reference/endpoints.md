@@ -40,6 +40,33 @@ Intercepts completions requests, applies agent safety guards, performs cache loo
 }
 ```
 
+When a non-streaming response contains provider tool calls and the called tools
+are registered in the OSS MCP registry, the gateway executes them before
+returning. The original provider response is preserved and receives a
+provider-compatible `tool_results` array. For OpenAI-compatible responses, each
+entry has `role: "tool"`, the original `tool_call_id`, and the MCP result in
+`content`.
+
+```json
+{
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "tool_calls": [{
+        "id": "call_abc123",
+        "type": "function",
+        "function": {"name": "query_db", "arguments": "{}"}
+      ]
+    }
+  }],
+  "tool_results": [{
+    "role": "tool",
+    "tool_call_id": "call_abc123",
+    "content": "{\"rows\": []}"
+  }]
+}
+```
+
 ---
 
 ## 2. Configuration Control Plane (`kryneth_config`)
