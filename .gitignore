@@ -7,6 +7,7 @@ Cargo.lock
 # Environment files
 .agent
 .env
+.kilo
 .env.local
 .env.*.local
 env.local

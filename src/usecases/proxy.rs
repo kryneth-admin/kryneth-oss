@@ -1638,7 +1638,7 @@ async fn handle_buffered_response(
     // ── Tunnel 3 Phase 2: Phantom tool interception ───────────────────────────
     // If the LLM called the phantom `get_tool_details` tool, resolve the
     // schema from cache and replace body_bytes — no external call needed.
-    let body_bytes = if !state.tool_registry.is_empty() {
+    let mut body_bytes = if !state.tool_registry.is_empty() {
         if let Some(phantom_resp) = state.tool_registry.intercept_phantom_call(&body_bytes) {
             tracing::debug!("Tunnel 3 Phase 2 — phantom call resolved from cache");
             phantom_resp
@@ -1723,7 +1723,9 @@ async fn handle_buffered_response(
                             &*adapter,
                         );
 
-                        // Forward merged tool results to telemetry as structured context.
+                        body_bytes = attach_tool_results(body_bytes, &tool_messages)?;
+
+                        // Forward the same provider-native results to telemetry as structured context.
                         let ctx_payload = serde_json::json!({
                             "type": "mcp_tool_results",
                             "tenant_id": tenant_id,
@@ -1781,6 +1783,26 @@ async fn handle_buffered_response(
         body: ProxyBody::Buffered(body_bytes),
         cache_hit: false,
     })
+}
+
+/// Adds provider-native tool results to the upstream response without discarding
+/// the original assistant tool call or changing the response status.
+fn attach_tool_results(
+    response_body: Vec<u8>,
+    tool_messages: &Value,
+) -> Result<Vec<u8>, GatewayError> {
+    let mut response: Value = serde_json::from_slice(&response_body)
+        .map_err(|e| GatewayError::ResponseBuild(format!("Failed to attach MCP results: {e}")))?;
+
+    let object = response.as_object_mut().ok_or_else(|| {
+        GatewayError::ResponseBuild(
+            "Cannot attach MCP results to a non-object provider response".to_string(),
+        )
+    })?;
+    object.insert("tool_results".to_string(), tool_messages.clone());
+
+    serde_json::to_vec(&response)
+        .map_err(|e| GatewayError::ResponseBuild(format!("Failed to serialize MCP results: {e}")))
 }
 
 // ── Telemetry helpers ─────────────────────────────────────────────────────────
@@ -2485,10 +2507,11 @@ mod tests {
         let routing_state = Arc::new(crate::domain::models::RoutingState::new());
         let l1_cache = Arc::new(crate::infrastructure::l1_cache::L1Cache::new(1024).unwrap());
         let http_client = reqwest::Client::new();
+        let mcp_registry = crate::infrastructure::mcp_registry::McpConnectionRegistry::empty();
 
         let state = AppState {
-            http_client,
-            compliance_url: String::new(),
+            http_client: http_client.clone(),
+            compliance_url: mock_server.uri(),
             rate_limit_max: 0,
             rate_limit_window: 0,
             dashboard_url: String::new(),
@@ -2508,13 +2531,16 @@ mod tests {
                 ),
             ),
             reconciler: Arc::new(crate::infrastructure::oss_adapters::OssReconciler),
-            tool_transport: Arc::new(crate::infrastructure::oss_adapters::OssToolTransport),
+            tool_transport: Arc::new(crate::infrastructure::mcp_client::McpToolTransport::new(
+                http_client,
+                mcp_registry.clone(),
+            )),
             rate_limit_cache: Arc::new(dashmap::DashMap::new()),
             l1_cache,
             routing_state,
             circuit_breaker,
             loop_fallback_cache,
-            mcp_registry: crate::infrastructure::mcp_registry::McpConnectionRegistry::empty(),
+            mcp_registry,
             tool_registry: crate::usecases::tool_router::ToolRegistry::empty(),
             agent_guardian_cache,
             operation_cache: moka::future::Cache::builder().build(),
@@ -2529,6 +2555,144 @@ mod tests {
         };
 
         (Arc::new(state), mock_server)
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tool_results_are_visible_to_client() {
+        let (state, upstream_server) = setup_proxy_test_state().await;
+        let mcp_server = wiremock::MockServer::start().await;
+
+        let tenant_id = "test-tenant";
+        let model_name = "test-model";
+        let tool_call_id = "call_weather_1";
+
+        let mut tenant_models = std::collections::HashMap::new();
+        tenant_models.insert(
+            model_name.to_string(),
+            crate::domain::models::ModelConfig {
+                targets: vec![crate::domain::models::UpstreamTarget {
+                    priority: 1,
+                    weight: 1,
+                    api_key_alias: "primary".into(),
+                    api_key: "sk-primary".into(),
+                    provider_name: "openai".into(),
+                    base_url: upstream_server.uri(),
+                    target_model: "gpt-4o".into(),
+                    schema_format: "openai".into(),
+                }],
+                ..Default::default()
+            },
+        );
+        let mut routing = std::collections::HashMap::new();
+        routing.insert(tenant_id.to_string(), tenant_models);
+        state.routing_state.state.store(Arc::new(routing));
+
+        state.mcp_registry.update_server(
+            "get_weather".into(),
+            mcp_server.uri(),
+            std::collections::HashMap::new(),
+        );
+
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("POST"))
+            .and(path("/v1/data/kryneth/mcp/allow"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": true
+            })))
+            .mount(&upstream_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "chatcmpl-tool-call",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": serde_json::Value::Null,
+                        "tool_calls": [{
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": "{\"location\":\"Paris\"}"
+                            }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }]
+            })))
+            .mount(&upstream_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "content": [{"type": "text", "text": "Paris is sunny"}]
+                }
+            })))
+            .mount(&mcp_server)
+            .await;
+
+        let body = axum::body::Bytes::from(
+            serde_json::json!({
+                "model": model_name,
+                "messages": [{"role": "user", "content": "What is the weather?"}]
+            })
+            .to_string(),
+        );
+        let mut req_extensions = axum::http::Extensions::new();
+        req_extensions.insert(100.0f64);
+
+        let trace_ctx = TraceContext {
+            trace_id: "trace-mcp-client-visible".into(),
+            session_id: "session-mcp-client-visible".into(),
+            parent_trace_id: None,
+            workflow_id: None,
+            agent_id: None,
+            execution_id: None,
+            operation_id: None,
+            idempotency_key: None,
+            test_scenario: None,
+        };
+
+        let result = execute_proxy(
+            &state,
+            &body,
+            tenant_id,
+            model_name,
+            "*/*",
+            &trace_ctx,
+            RoutingStrategy::Default,
+            false,
+            &req_extensions,
+            false,
+            None,
+        )
+        .await
+        .expect("proxy request with MCP tool call should succeed");
+
+        let ProxyBody::Buffered(response_body) = result.body else {
+            panic!("expected buffered MCP response");
+        };
+        let response: serde_json::Value = serde_json::from_slice(&response_body).unwrap();
+        assert_eq!(
+            response["tool_results"][0]["role"], "tool",
+            "client response must contain an OpenAI-compatible tool message"
+        );
+        assert_eq!(response["tool_results"][0]["tool_call_id"], tool_call_id);
+        assert_eq!(response["tool_results"][0]["content"], "Paris is sunny");
+        assert_eq!(
+            response["choices"][0]["message"]["tool_calls"][0]["id"], tool_call_id,
+            "original assistant tool call must remain available to the client"
+        );
     }
 
     #[tokio::test]
