@@ -11,9 +11,9 @@ Kryneth Gateway is packaged as a lightweight container available on Docker Hub f
 
 | Image | Tag | Description | Size |
 | :--- | :--- | :--- | :--- |
-| `krynethgw/kryneth-gateway` | `latest` | Multi-architecture production image | ~45MB |
-| `krynethgw/kryneth-gateway` | `latest-slim` | Stripped Alpine binary | ~35MB |
-| `krynethgw/kryneth-gateway` | `v0.1.0` | Pinned immutable version | ~45MB |
+| `kryenthhq/krynethgw` | `latest` | Multi-architecture production image | ~45MB |
+| `kryenthhq/krynethgw` | `latest-slim` | Stripped Alpine binary | ~35MB |
+| `kryenthhq/krynethgw` | `v0.1.0` | Pinned immutable version | ~45MB |
 
 ### Supported Architectures
 -   `linux/amd64` (Intel/AMD x86_64)
@@ -62,7 +62,7 @@ docker run -d \
   -p 8080:8080 \
   --env-file .env \
   -v $(pwd)/routing.yaml:/app/routing.yaml:ro \
-  krynethgw/kryneth-gateway:latest
+  kryenthhq/krynethgw:latest
 ```
 
 > [!IMPORTANT]
@@ -80,7 +80,7 @@ version: '3.8'
 
 services:
   kryneth-gateway:
-    image: krynethgw/kryneth-gateway:latest
+    image: kryenthhq/krynethgw:latest
     container_name: kryneth-gateway
     ports:
       - "8080:8080"

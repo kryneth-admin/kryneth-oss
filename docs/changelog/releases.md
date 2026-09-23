@@ -7,6 +7,13 @@ Track additions, changes, and safety updates introduced across Kryneth Gateway r
 
 ---
 
+## [v0.1.1] — Multi-Architecture & Automation Update
+
+### Added
+-   **Automated Multi-Arch Builds**: Fully automated GitHub Actions CI/CD pipeline to deploy Docker images for `linux/amd64` and `linux/arm64`.
+-   **Docker Hub Integration**: Verified, production-ready images now continuously published to `kryenthhq/krynethgw:latest`.
+-   **Improved Deployment Docs**: Clarified Docker configuration instructions to point to the new automated builds.
+
 ## [v0.1.0] — Initial Release
 
 ### Added
