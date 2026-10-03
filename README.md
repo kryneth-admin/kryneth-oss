@@ -48,7 +48,7 @@ Drop Kryneth in front of your existing AI requests in under 60 seconds:
 
 ```bash
 # 1. Boot the gateway
-docker run -d -p 8080:8080 crossroot/kryneth-gateway:latest
+docker run -d -p 8080:8080 kryenthhq/krynethgw:latest
 
 # 2. Point your existing OpenAI SDK or agent client to localhost
 export OPENAI_BASE_URL="http://localhost:8080/v1"
