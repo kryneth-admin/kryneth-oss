@@ -9,12 +9,12 @@ echo "========================================"
 
 # 1. Docker Login Check
 echo "[1/4] Checking Docker Hub authentication..."
-# We check if the user is logged in as kryenthhq
-if ! docker info | grep -i "Username: kryenthhq" > /dev/null 2>&1; then
-    echo "You are not logged in as 'kryenthhq'. Prompting for login..."
-    docker login -u kryenthhq
+# We check if the user is logged in as krynethhq
+if ! docker info | grep -i "Username: krynethhq" > /dev/null 2>&1; then
+    echo "You are not logged in as 'krynethhq'. Prompting for login..."
+    docker login -u krynethhq
 else
-    echo "Already authenticated as 'kryenthhq'."
+    echo "Already authenticated as 'krynethhq'."
 fi
 
 # 2. Buildx Initialization
@@ -32,7 +32,7 @@ fi
 
 # 3. Build & Push
 echo "[3/4] Building and pushing linux/amd64 and linux/arm64..."
-IMAGE_TAG="kryenthhq/krynethgw:latest"
+IMAGE_TAG="krynethhq/krynethgw:latest"
 docker buildx build \
     --platform linux/amd64,linux/arm64 \
     -t "$IMAGE_TAG" \
@@ -50,7 +50,7 @@ version: '3.8'
 
 services:
   kryneth-gateway:
-    image: kryenthhq/krynethgw:latest
+    image: krynethhq/krynethgw:latest
     container_name: kryneth-gateway
     restart: unless-stopped
     ports:
