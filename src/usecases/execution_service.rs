@@ -15,14 +15,25 @@ use uuid::Uuid;
 
 pub fn resolve_tool_policy(tool_name: &str) -> ToolExecutionPolicy {
     let lower = tool_name.to_lowercase();
-    if lower.starts_with("get")
+    let is_composite_mutation = lower.contains("create")
+        || lower.contains("charge")
+        || lower.contains("pay")
+        || lower.contains("update")
+        || lower.contains("delete")
+        || lower.contains("mutate")
+        || lower.contains("insert")
+        || lower.contains("transfer");
+
+    let is_read_only_prefix = lower.starts_with("get")
         || lower.starts_with("list")
         || lower.starts_with("read")
         || lower.starts_with("describe")
         || lower.starts_with("search")
         || lower.starts_with("query")
-        || lower.starts_with("show")
-    {
+        || lower.starts_with("select")
+        || lower.starts_with("show");
+
+    if is_read_only_prefix && !is_composite_mutation {
         ToolExecutionPolicy {
             retry_policy: RetryPolicy::Safe,
             side_effect_class: SideEffectClass::ReadOnly,
@@ -78,8 +89,19 @@ impl ExecutionService {
             OperationId(hex::encode(hasher.finalize()))
         };
 
-        let is_explicit_idem = trace_ctx.idempotency_key.is_some();
+        let _is_explicit_idem = trace_ctx.idempotency_key.is_some();
         let idempotency_key = if let Some(ref key) = trace_ctx.idempotency_key {
+            let canonical_args =
+                match serde_json::from_str::<serde_json::Value>(&tool_call.arguments) {
+                    Ok(val) => {
+                        let canonical_val =
+                            crate::infrastructure::mcp_client::canonicalize_json(val);
+                        serde_json::to_string(&canonical_val)
+                            .unwrap_or_else(|_| tool_call.arguments.clone())
+                    }
+                    Err(_) => tool_call.arguments.clone(),
+                };
+
             let mut hasher = Sha256::new();
             hasher.update(tenant_id.as_bytes());
             hasher.update(b"::");
@@ -89,7 +111,7 @@ impl ExecutionService {
             hasher.update(b"::");
             hasher.update(tool_call.name.as_bytes());
             hasher.update(b"::");
-            hasher.update(tool_call.arguments.as_bytes());
+            hasher.update(canonical_args.as_bytes());
             IdempotencyKey(hex::encode(hasher.finalize()))
         } else {
             let mut hasher = Sha256::new();
@@ -166,12 +188,22 @@ impl ExecutionService {
         }
 
         if claim_state == ExecutionState::Unknown {
-            // Unsafe retry check
-            if policy.retry_policy != RetryPolicy::Safe && is_explicit_idem {
-                // Mutating tool + explicit idempotency key + UNKNOWN = Block retry, try reconciliation
+            // Unsafe retry check: Any tool that is not strictly Safe retry policy must be blocked from blind re-execution
+            if policy.retry_policy != RetryPolicy::Safe {
                 let mut resolved_via_reconciliation = false;
                 let mut content_out = String::new();
                 let mut latency_out = 0u64;
+
+                // Transition state to Reconciling
+                let _ = state
+                    .execution_store
+                    .transition(
+                        &idempotency_key,
+                        ExecutionState::Unknown,
+                        ExecutionState::Reconciling,
+                        claim_ctx.version,
+                    )
+                    .await;
 
                 // Try reconciliation
                 let recon_res = state.reconciler.reconcile(&initial_execution).await;
@@ -207,7 +239,18 @@ impl ExecutionService {
                             success: false,
                         };
                     }
-                    _ => {} // Still unknown, block retry below
+                    _ => {
+                        // Still unknown: revert state back to Unknown
+                        let _ = state
+                            .execution_store
+                            .transition(
+                                &idempotency_key,
+                                ExecutionState::Reconciling,
+                                ExecutionState::Unknown,
+                                claim_ctx.version,
+                            )
+                            .await;
+                    }
                 }
 
                 if resolved_via_reconciliation {

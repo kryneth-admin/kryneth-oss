@@ -215,13 +215,17 @@ use chrono::Utc;
 
 pub struct MokaExecutionStore {
     pub cache: moka::future::Cache<String, crate::domain::models::OperationCacheEntry>,
+    claim_lock: tokio::sync::Mutex<()>,
 }
 
 impl MokaExecutionStore {
     pub fn new(
         cache: moka::future::Cache<String, crate::domain::models::OperationCacheEntry>,
     ) -> Self {
-        Self { cache }
+        Self {
+            cache,
+            claim_lock: tokio::sync::Mutex::new(()),
+        }
     }
 }
 
@@ -238,6 +242,7 @@ impl ExecutionStore for MokaExecutionStore {
         >,
     > {
         Box::pin(async move {
+            let _guard = self.claim_lock.lock().await;
             let key = execution.idempotency_key.0.clone();
             let now = Utc::now();
             let lease_until = std::time::Instant::now() + lease_duration;
@@ -255,7 +260,9 @@ impl ExecutionStore for MokaExecutionStore {
                             .unwrap_or(true);
 
                         if !is_lease_expired {
-                            return Ok((existing.state, existing.context));
+                            // Another caller holds an active unexpired lease.
+                            // Return Running so the caller knows this operation is already in flight.
+                            return Ok((ExecutionState::Running, existing.context));
                         }
 
                         existing.state = ExecutionState::Claimed;
@@ -308,8 +315,8 @@ impl ExecutionStore for MokaExecutionStore {
                 execution: exec,
             };
 
-            let entry = self.cache.get_with(key, async { new_entry }).await;
-            Ok((entry.state, entry.context))
+            self.cache.insert(key, new_entry.clone()).await;
+            Ok((new_entry.state, new_entry.context))
         })
     }
 
@@ -363,7 +370,8 @@ impl ExecutionStore for MokaExecutionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
-                if entry.context.version == version {
+                // Succeeded is valid from live attempt or reconciliation, but cannot overwrite Unknown directly without reconciliation
+                if entry.context.version == version && entry.state != ExecutionState::Unknown {
                     entry.state = ExecutionState::Succeeded;
                     entry.context.result_content = Some(content);
                     entry.context.latency_ms = Some(latency_ms);
@@ -384,7 +392,8 @@ impl ExecutionStore for MokaExecutionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
-                if entry.context.version == version {
+                // Succeeded is a terminal outcome and must not be demoted
+                if entry.state != ExecutionState::Succeeded && entry.context.version == version {
                     entry.state = ExecutionState::Failed;
                     entry.context.error_message = Some(reason);
                     entry.execution.state = ExecutionState::Failed;
@@ -403,7 +412,8 @@ impl ExecutionStore for MokaExecutionStore {
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
         Box::pin(async move {
             if let Some(mut entry) = self.cache.get(&idempotency_key.0).await {
-                if entry.context.version == version {
+                // Succeeded is a terminal outcome and must not be demoted
+                if entry.state != ExecutionState::Succeeded && entry.context.version == version {
                     entry.state = ExecutionState::Unknown;
                     entry.execution.state = ExecutionState::Unknown;
                     entry.execution.updated_at = Utc::now();

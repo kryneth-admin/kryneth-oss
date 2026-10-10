@@ -1,0 +1,52 @@
+﻿import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+// k6 options configuration
+export const options = {
+  vus: 50, // Reduce concurrency for CI environment stability
+  duration: '30s', // Run for 30 seconds
+  thresholds: {
+    // Relaxed for standard GitHub Action Runner (2-core) capability
+    http_req_failed: ['rate<0.05'],
+    http_req_duration: ['p(95)<150'],
+  },
+};
+
+const BASE_URL = 'http://35.208.247.249:8080';
+const HEADERS = {
+  'Content-Type': 'application/json',
+  'Authorization': 'Bearer re_live_dev_123', // Match key in gateway config
+  'x-tenant-id': '00000000-0000-0000-0000-000000000000',
+  'x-kryneth-model': 'mock-model',
+};
+
+const PAYLOAD = JSON.stringify({
+  model: 'mock-model',
+  messages: [{ role: 'user', content: 'What is the speed of light?' }],
+  stream: false,
+});
+
+// Setup: seed the cache once before load test starts
+export function setup() {
+  console.log('ðŸŒ± Seeding Kryneth Cache with initial request...');
+  const res = http.post(`${BASE_URL}/v1/chat/completions`, PAYLOAD, { headers: HEADERS });
+  
+  const success = check(res, {
+    'setup request succeeded': (r) => r.status === 200,
+  });
+
+  if (!success) {
+    throw new Error(`Failed to seed cache: HTTP ${res.status}. Is the gateway running on ${BASE_URL}?`);
+  }
+  
+  console.log('âœ… Cache seeded successfully. Starting benchmark...');
+}
+
+export default function () {
+  const res = http.post(`${BASE_URL}/v1/chat/completions`, PAYLOAD, { headers: HEADERS });
+
+  check(res, {
+    'status is 200': (r) => r.status === 200,
+    'cache hit header present': (r) => r.headers['X-Cache'] === 'HIT' || r.headers['x-cache'] === 'HIT',
+  });
+}
