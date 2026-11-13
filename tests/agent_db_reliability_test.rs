@@ -30,8 +30,6 @@ use kryneth_gateway::usecases::execution_service::{resolve_tool_policy, Executio
 use moka::future::Cache;
 use serde_json::{json, Value};
 
-// ── Mock Agent Database & Transaction Engine ────────────────────────────────
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DbTransactionRecord {
     pub tx_id: String,
@@ -92,8 +90,6 @@ impl MockAgentDatabase {
         self.commit_count.load(Ordering::SeqCst)
     }
 }
-
-// ── Database Transport Adapter ──────────────────────────────────────────────
 
 pub struct MockDatabaseTransport {
     pub db: Arc<MockAgentDatabase>,
@@ -261,8 +257,6 @@ impl ToolTransport for MockDatabaseTransport {
     }
 }
 
-// ── Database Reconciler ─────────────────────────────────────────────────────
-
 pub struct DatabaseReconciler {
     pub db: Arc<MockAgentDatabase>,
 }
@@ -343,8 +337,6 @@ fn setup_agent_db_test_app(db: Arc<MockAgentDatabase>) -> Arc<AppState> {
         budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new())),
     })
 }
-
-// ── AGENT DATABASE RELIABILITY TESTS ────────────────────────────────────────
 
 /// 1. Agent DB Mutation: Commit-then-timeout reconciles without double SQL debit.
 #[tokio::test]

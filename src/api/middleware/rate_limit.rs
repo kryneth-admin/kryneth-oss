@@ -195,11 +195,8 @@ pub async fn rate_limit_middleware(
         return Ok(response);
     }
 
-    // ── Allowed (or fail-open): forward to the next layer ────────────────────
     Ok(next.run(request).await)
 }
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -226,8 +223,8 @@ mod tests {
 
         let (tenant, user) = extract_identifiers(&headers, &addr);
 
-        assert_eq!(tenant, "192.168.1.200"); // IP fallback
-        assert_eq!(user, "anon_user"); // constant fallback
+        assert_eq!(tenant, "192.168.1.200");
+        assert_eq!(user, "anon_user");
     }
 
     #[test]
@@ -245,7 +242,6 @@ mod tests {
 
     #[test]
     fn test_bucket_key_scoped_to_route() {
-        // Validate the key format used by the middleware
         let tenant_id = "11111111-2222-3333-4444-555555555555";
         let model = "gpt-production";
         let key = format!("rl:tb:{}:{}", tenant_id, model);
@@ -267,12 +263,10 @@ mod tests {
     fn test_refill_rate_formula() {
         let capacity_rpm: u32 = 60;
         let refill_rate = capacity_rpm as f64 / 60.0;
-        // 60 RPM → 1 token per second
         assert!((refill_rate - 1.0).abs() < f64::EPSILON);
 
         let capacity_rpm: u32 = 600;
         let refill_rate = capacity_rpm as f64 / 60.0;
-        // 600 RPM → 10 tokens per second
         assert!((refill_rate - 10.0).abs() < f64::EPSILON);
     }
 }

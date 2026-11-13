@@ -26,7 +26,6 @@ struct ChatRequest {
 
 #[tokio::main]
 async fn main() {
-    // Build router
     let app = Router::new()
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/api/v1/compliance/redact", post(handle_compliance_redact))
@@ -62,7 +61,6 @@ async fn handle_chat_completions(Json(payload): Json<ChatRequest>) -> impl IntoR
     let model = payload.model;
 
     if payload.stream {
-        // Stream response via SSE
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(10);
 
         let request_id_clone = request_id.clone();
@@ -108,7 +106,6 @@ async fn handle_chat_completions(Json(payload): Json<ChatRequest>) -> impl IntoR
                 tokio::task::yield_now().await;
             }
 
-            // Finish reason stop chunk
             let stop_chunk = json!({
                 "id": request_id_clone,
                 "object": "chat.completion.chunk",
@@ -125,7 +122,6 @@ async fn handle_chat_completions(Json(payload): Json<ChatRequest>) -> impl IntoR
             let data = format!("data: {}\n\n", serde_json::to_string(&stop_chunk).unwrap());
             let _ = tx.send(Ok(bytes::Bytes::from(data))).await;
 
-            // Send DONE
             let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
         });
 
@@ -137,7 +133,6 @@ async fn handle_chat_completions(Json(payload): Json<ChatRequest>) -> impl IntoR
             .body(body)
             .unwrap()
     } else {
-        // Return standard JSON
         let response = json!({
             "id": request_id,
             "object": "chat.completion",

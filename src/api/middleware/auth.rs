@@ -32,8 +32,6 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
-// ── Role ─────────────────────────────────────────────────────────────────────
-
 /// RBAC role embedded in JWT claims.
 /// Missing `"role"` field in a JWT defaults to `Developer` (backward-compatible).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,8 +50,6 @@ impl Default for Role {
         Role::Developer
     }
 }
-
-// ── Claims ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claims {
@@ -75,33 +71,27 @@ pub struct Claims {
     pub api_key_alias: Option<String>,
 }
 
-// ── JWT source discriminant ───────────────────────────────────────────────────
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JwtSource {
     BearerHeader,
     Cookie,
 }
 
-// ── Primary auth middleware ───────────────────────────────────────────────────
-
 pub async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     req: Request<Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // 1. CORS Preflight bypass
     if req.method() == axum::http::Method::OPTIONS {
         return Ok(next.run(req).await);
     }
 
-    // 2. Public endpoint bypass
     let path = req.uri().path();
     if path == "/health" || path == "/v1/health" {
         return Ok(next.run(req).await);
     }
 
-    // 2.5. OSS Localhost admin bypass check
+    // OSS Localhost admin bypass check
     {
         let is_loopback = if let Some(axum::extract::ConnectInfo(addr)) =
             req.extensions()
@@ -147,7 +137,7 @@ pub async fn auth_middleware(
         }
     }
 
-    // 3. Token extraction — precedence: Bearer > x-api-key > Cookie
+    // Token extraction precedence: Bearer > x-api-key > Cookie
     #[derive(Clone, Copy)]
     enum TokenKind {
         ApiKey,
@@ -191,7 +181,7 @@ pub async fn auth_middleware(
         }
     }
 
-    // Cookie fallback (CSRF guard applied inside handle_jwt)
+    // Cookie fallback (CSRF guard enforced in handle_jwt)
     if token_opt.is_none() {
         if let Some(cookie_header) = req.headers().get(header::COOKIE) {
             if let Ok(cookie_str) = cookie_header.to_str() {
@@ -228,8 +218,6 @@ pub async fn auth_middleware(
     }
 }
 
-// ── RBAC: require_admin ───────────────────────────────────────────────────────
-
 /// Axum middleware that enforces `Role::Admin`.
 /// Applied to all `/v1/admin/*` routes in `routes.rs`.
 /// Must be layered AFTER `auth_middleware` (so `Claims` is already injected).
@@ -249,8 +237,6 @@ pub async fn require_admin(
     }
     Ok(next.run(req).await)
 }
-
-// ── RBAC: require_team_plan ───────────────────────────────────────────────────
 
 /// Axum middleware that restricts features to Team or Enterprise plans.
 #[allow(clippy::result_large_err)]
@@ -274,8 +260,6 @@ pub async fn require_team_plan(
     }
     Ok(next.run(req).await)
 }
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
 
 pub fn verify_jwt(token: &str) -> Result<Claims, StatusCode> {
     let secret = std::env::var("JWT_SECRET").map_err(|_| {
@@ -419,8 +403,6 @@ async fn handle_api_key(
 
     Ok(next.run(req).await)
 }
-
-// ── AES-256-GCM decryption helper ────────────────────────────────────────────
 
 pub fn decrypt_api_key(encrypted_data: &[u8]) -> Result<String, &'static str> {
     let master_key = std::env::var("AES_MASTER_KEY").map_err(|_| "AES_MASTER_KEY missing")?;

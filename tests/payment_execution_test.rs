@@ -34,8 +34,6 @@ use kryneth_gateway::usecases::execution_service::ExecutionService;
 use moka::future::Cache;
 use serde_json::Value;
 
-// ── Deterministic Mock Payment Service & Ledger ─────────────────────────────
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PaymentRecord {
     pub payment_id: String,
@@ -304,8 +302,6 @@ fn setup_payment_test_app(ledger: Arc<MockPaymentLedger>) -> Arc<AppState> {
         budget_map: Arc::new(arc_swap::ArcSwap::from_pointee(HashMap::new())),
     })
 }
-
-// ── ACCEPTANCE TESTS ────────────────────────────────────────────────────────
 
 /// 1. Happy path: Normal payment success creates exactly one payment.
 #[tokio::test]

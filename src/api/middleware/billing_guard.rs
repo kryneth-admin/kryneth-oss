@@ -1,4 +1,5 @@
-// Extracts the tenant's wallet balance from OSS configuration or memory and injects it into request extensions. Final HTTP 402 rejection based on provider rates is delegated to the proxy execution stage.
+//! Middleware for tenant wallet balance extraction and injection into request extensions.
+//! Final HTTP 402 rejection based on provider rates is delegated to the proxy execution stage.
 
 use crate::domain::models::AppState;
 use crate::error::GatewayError;
@@ -17,7 +18,6 @@ pub async fn billing_guard_middleware(
     mut req: Request<Body>,
     next: Next,
 ) -> Result<Response, GatewayError> {
-    // 1. Extract the verified x-tenant-id header injected by auth_middleware
     let tenant_id = match req.headers().get("x-tenant-id") {
         Some(value) => match value.to_str() {
             Ok(s) => Some(s.trim().to_string()),
@@ -27,16 +27,13 @@ pub async fn billing_guard_middleware(
     };
 
     if let Some(tid) = tenant_id {
-        // Bypass checks for non-route sentinel requests or health checks
         if tid == "anonymous" || req.uri().path() == "/health" {
             return Ok(next.run(req).await);
         }
 
-        // 2. Lookup balance via BillingPort
         let balance = state.billing.check_balance(&tid).await?;
         req.extensions_mut().insert(balance);
     }
 
-    // 4. Wallet verified; forward to the next handler/middleware in Tower chain
     Ok(next.run(req).await)
 }

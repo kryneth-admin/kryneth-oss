@@ -14,7 +14,6 @@ use crate::api::middleware::auth::{auth_middleware, require_admin};
 use crate::domain::models::AppState;
 
 pub fn create_router(state: Arc<AppState>) -> Router {
-    // ── LLM proxy: rate limit + auth ─────────────────────────────────────────
     let proxy_routes = Router::new()
         .route("/chat/completions", post(handlers::chat_completions))
         .route("/responses", post(handlers::chat_completions))
@@ -32,24 +31,20 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             auth_middleware,
         ));
 
-    // ── Admin: auth → require_admin (RBAC) ───────────────────────────────────
-    // `require_admin` is inner (runs first on the way in, after auth injects Claims).
-    // Order: auth_middleware → require_admin → handler.
+    // Middleware execution order: auth_middleware runs first to inject Claims,
+    // followed by require_admin before reaching the handler.
     let admin_routes = Router::new()
         .route("/dashboard", get(handlers::get_dashboard))
         .route("/metrics/live", get(handlers::get_live_metrics))
         .route("/routing-state", get(handlers::get_routing_state))
         .route("/traces/:trace_id", get(handlers::get_admin_trace))
         .route("/billing/top-up", post(handlers::top_up_wallet))
-        // RBAC: Admin role required for ALL /v1/admin/* routes.
-        // Applied before auth so Claims is already in extensions when it runs.
         .route_layer(axum::middleware::from_fn(require_admin))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
         ));
 
-    // ── MCP: auth only (no admin requirement) ────────────────────────────────
     let mcp_routes = Router::new()
         .route("/registry", get(handlers::get_mcp_registry))
         .route_layer(axum::middleware::from_fn_with_state(

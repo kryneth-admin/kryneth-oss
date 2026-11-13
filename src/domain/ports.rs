@@ -70,8 +70,6 @@ pub trait AuthPort: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(String, String), GatewayError>> + Send + 'a>>;
 }
 
-// ── Phase 3: Infrastructure Ports ─────────────────────────────────────────────
-
 /// Port for the distributed, per-tenant token-bucket rate limiter.
 ///
 /// **Enterprise adapter** (`EnterpriseRateLimit`): spawns the Tokio background
@@ -162,8 +160,6 @@ pub trait SemanticCachePort: Send + Sync {
         vector: &'a [f32],
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 }
-
-// ── Execution safety ports ──────────────────────────────────────────────────
 
 use crate::domain::execution::{ExecutionContext, ExecutionState, IdempotencyKey, ToolExecution};
 use serde::{Deserialize, Serialize};

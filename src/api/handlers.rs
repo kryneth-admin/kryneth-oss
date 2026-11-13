@@ -34,8 +34,6 @@ use crate::domain::models::{AppState, TraceContext};
 use crate::error::GatewayError;
 use crate::usecases::proxy;
 
-// ── Health ────────────────────────────────────────────────────────────────────
-
 /// GET /health
 pub async fn health_check() -> impl IntoResponse {
     Json(json!({
@@ -44,8 +42,6 @@ pub async fn health_check() -> impl IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
-
-// ── Chat Completions (≤ 40 lines) ─────────────────────────────────────────────
 
 /// Zero-copy model extractor: borrows lifetime from the incoming `body_bytes` slice.
 #[derive(serde::Deserialize)]
@@ -67,7 +63,6 @@ pub async fn chat_completions(
         .dashboard_metrics
         .total_requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Validate request JSON and model parameter (GTM Hardening, Finding 1)
     let parsed_model: ExtractModel<'_> = serde_json::from_slice(&body_bytes)
         .map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
     let model_name = parsed_model
@@ -75,7 +70,6 @@ pub async fn chat_completions(
         .ok_or(GatewayError::MissingModel)?
         .into_owned();
 
-    // All header extractions are zero-copy &str slices — no .to_string() until needed.
     let content_type = headers
         .get("content-type")
         .and_then(|v| v.to_str().ok())
@@ -135,7 +129,6 @@ pub async fn chat_completions(
     };
     let test_scenario = test_scenario_owned.as_deref();
 
-    // Phase 1+2+loop-budget via AgenticOrchestrator (extracted from this handler).
     let agentic_ctx = crate::usecases::agentic_orchestrator::orchestrate(
         &state,
         body_bytes,
@@ -149,8 +142,6 @@ pub async fn chat_completions(
     )
     .await?;
 
-    // Delegate to proxy use-case. body_bytes may be schema-stripped (Phase 2).
-    // ZERO-COPY: raw_prompt removed — proxy receives &body_bytes directly.
     let mut extensions = extensions;
     if let Some(lc) = agentic_ctx.loop_count {
         extensions.insert(lc);
@@ -216,8 +207,6 @@ fn build_response(
 
     Ok(response)
 }
-
-// ── Admin handlers (thin delegates) ──────────────────────────────────────────
 
 /// GET /v1/admin/routing-state
 #[instrument(skip(state, claims))]
@@ -385,8 +374,6 @@ pub async fn get_mcp_registry(
     Ok(Json(json!(response)))
 }
 
-// ── Agentic detection ─────────────────────────────────────────────────────────
-
 /// Fast, allocation-minimising agentic payload detector.
 ///
 /// ## Zero-Copy Notes
@@ -397,7 +384,6 @@ pub fn detect_agentic_payload(body_bytes: &[u8], content_type: &str) -> bool {
     if body_bytes.len() > 5 * 1024 * 1024 || !content_type.starts_with("application/json") {
         return false;
     }
-    // Fast-path: byte-level scan for "tools" or "tool_choice"
     if !body_bytes.windows(b"tools".len()).any(|w| w == b"tools")
         && !body_bytes
             .windows(b"tool_choice".len())
@@ -411,8 +397,6 @@ pub fn detect_agentic_payload(body_bytes: &[u8], content_type: &str) -> bool {
         _ => false,
     }
 }
-
-// ── Dashboard Handlers ────────────────────────────────────────────────────────
 
 pub async fn get_dashboard() -> impl axum::response::IntoResponse {
     axum::response::Html(include_str!("dashboard.html"))
@@ -491,11 +475,9 @@ pub fn extract_test_scenario_with_env<'a>(
         .unwrap_or(false);
 
     if !is_prod {
-        // Non-production (local, dev, staging): always allow test_scenario
         return Some(raw_scenario);
     }
 
-    // Production: Guard 1 + Guard 2 - allow ONLY for Admin role or internal test keys
     if let Some(c) = claims {
         let is_admin = matches!(c.role, crate::api::middleware::auth::Role::Admin);
         let is_internal_key = c
@@ -515,11 +497,8 @@ pub fn extract_test_scenario_with_env<'a>(
         }
     }
 
-    // Discard header for normal client API keys in production
     None
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

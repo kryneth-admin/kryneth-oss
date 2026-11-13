@@ -34,8 +34,6 @@ use crate::domain::utp_models::{ToolExecutionStatus, UniversalToolResult};
 use crate::infrastructure::mcp_registry::McpConnectionRegistry;
 use crate::infrastructure::providers::traits::UniversalProviderAdapter;
 
-// ── Idempotency helpers ────────────────────────────────────────────────────────
-
 /// Recursively converts all JSON Object keys to sorted BTreeMap representations for deep canonicalization.
 pub fn canonicalize_json(val: Value) -> Value {
     match val {
@@ -71,8 +69,6 @@ pub fn generate_idempotency_key(tenant_id: &str, tool_name: &str, raw_args: &str
     hex::encode(hasher.finalize())
 }
 
-// ── Domain types ──────────────────────────────────────────────────────────────
-
 /// A single tool call extracted from an LLM `tool_calls` array.
 #[derive(Debug, Clone)]
 pub struct ToolCall {
@@ -98,8 +94,6 @@ pub struct ToolResult {
     /// `true` if the MCP call succeeded.
     pub success: bool,
 }
-
-// ── Public entry point ────────────────────────────────────────────────────────
 
 /// Parses `tool_calls` from an LLM response body using the provided UTP `adapter`
 /// and returns them as a `Vec<ToolCall>`.
@@ -219,8 +213,6 @@ pub fn merge_results(
         .unwrap_or_else(|_| Value::Array(Vec::new()))
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
 /// Executes a single MCP tool call against its registered SSE endpoint.
 ///
 /// Uses the `McpConnectionRegistry` to resolve the endpoint URL.  If the
@@ -235,7 +227,6 @@ async fn execute_single_tool_call(
 ) -> ToolResult {
     let start = std::time::Instant::now();
 
-    // Resolve the MCP endpoint URL from the Phase 1 registry.
     let sse_url = match mcp_registry.get_url(&tc.name) {
         Some(url) => url,
         None => {
@@ -253,7 +244,6 @@ async fn execute_single_tool_call(
         }
     };
 
-    // Build the MCP tool-call request body (MCP 2024-11-05 spec).
     let mcp_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -268,7 +258,7 @@ async fn execute_single_tool_call(
 
     let mut request_builder = http_client
         .post(&messages_url)
-        .timeout(std::time::Duration::from_millis(4500)) // < 5s outer tokio timeout
+        .timeout(std::time::Duration::from_millis(4500))
         .json(&mcp_body);
 
     if let Some(scenario) = test_scenario {
@@ -279,7 +269,6 @@ async fn execute_single_tool_call(
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    // Record dynamic tool call telemetry in-memory (zero-copy, concurrent)
     mcp_registry.record_tool_call(tenant_id, &tc.name, latency_ms);
 
     match response {
@@ -470,8 +459,6 @@ fn build_telemetry_payload(
     })
 }
 
-// ── McpToolTransport ──────────────────────────────────────────────────────────
-
 pub struct McpToolTransport {
     pub http_client: reqwest::Client,
     pub mcp_registry: Arc<McpConnectionRegistry>,
@@ -518,8 +505,6 @@ impl crate::domain::ports::ToolTransport for McpToolTransport {
         })
     }
 }
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -605,11 +590,9 @@ mod tests {
         let arr = merged.as_array().unwrap();
         assert_eq!(arr.len(), 2);
 
-        // First entry: OpenAI format tool message
         assert_eq!(arr[0]["role"], "tool");
         assert_eq!(arr[0]["tool_call_id"], "call_abc");
 
-        // Second entry: timeout result
         assert_eq!(arr[1]["role"], "tool");
         assert_eq!(arr[1]["tool_call_id"], "call_def");
         assert!(arr[1]["content"].as_str().unwrap().contains("MCP_TIMEOUT"));

@@ -13,8 +13,6 @@ use crate::domain::ports::{
 };
 use crate::error::GatewayError;
 
-// ── OssTelemetry ─────────────────────────────────────────────────────────────
-
 pub struct OssTelemetry {
     pub trace_store: Arc<dashmap::DashMap<String, serde_json::Value>>,
 }
@@ -38,8 +36,6 @@ impl TelemetryPort for OssTelemetry {
     }
 }
 
-// ── OssBilling ────────────────────────────────────────────────────────────────
-
 pub struct OssBilling;
 
 impl BillingPort for OssBilling {
@@ -47,10 +43,7 @@ impl BillingPort for OssBilling {
         &'a self,
         _tenant_id: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<f64, GatewayError>> + Send + 'a>> {
-        Box::pin(async {
-            // OSS mode is unlimited balance
-            Ok(f64::MAX)
-        })
+        Box::pin(async { Ok(f64::MAX) })
     }
 
     fn enforce_scoped_budget<'a>(
@@ -60,10 +53,7 @@ impl BillingPort for OssBilling {
         _key_alias: Option<&'a str>,
         _model: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
-        Box::pin(async {
-            // OSS mode does not enforce budgets
-            Ok(())
-        })
+        Box::pin(async { Ok(()) })
     }
 
     fn process_billing_telemetry<'a>(
@@ -81,14 +71,9 @@ impl BillingPort for OssBilling {
         _cache_hit: bool,
         _is_free_tier: bool,
     ) -> Pin<Box<dyn Future<Output = Result<(), GatewayError>> + Send + 'a>> {
-        Box::pin(async {
-            // OSS mode billing analytics are no-op
-            Ok(())
-        })
+        Box::pin(async { Ok(()) })
     }
 }
-
-// ── OssAuth ───────────────────────────────────────────────────────────────────
 
 pub struct OssAuth;
 
@@ -110,7 +95,6 @@ impl AuthPort for OssAuth {
                 let candidate_hash = hex::encode(hasher.finalize());
 
                 if candidate_hash == key_hash {
-                    // Authenticated successfully! Return a default tenant ID and account type.
                     return Ok((
                         "00000000-0000-0000-0000-000000000000".to_string(),
                         "solo".to_string(),
@@ -123,8 +107,6 @@ impl AuthPort for OssAuth {
         })
     }
 }
-
-// ── OssRateLimit ─────────────────────────────────────────────────────────────
 
 pub struct OssRateLimit;
 
@@ -155,8 +137,6 @@ impl RateLimitPort for OssRateLimit {
     }
 }
 
-// ── OssRoutingConfig ─────────────────────────────────────────────────────────
-
 pub struct OssRoutingConfig;
 
 impl RoutingConfigPort for OssRoutingConfig {
@@ -165,11 +145,8 @@ impl RoutingConfigPort for OssRoutingConfig {
         _routing_state: Arc<crate::domain::models::RoutingState>,
         _mcp_registry: Arc<crate::infrastructure::mcp_registry::McpConnectionRegistry>,
     ) {
-        // OSS is static and loaded from file at boot time
     }
 }
-
-// ── OssSemanticCache ─────────────────────────────────────────────────────────
 
 pub struct OssSemanticCache;
 
@@ -186,10 +163,7 @@ impl SemanticCachePort for OssSemanticCache {
         _trace_ctx: &'a crate::domain::models::TraceContext,
         _vector: &'a [f32],
     ) -> Pin<Box<dyn Future<Output = Option<(String, String)>> + Send + 'a>> {
-        Box::pin(async {
-            // OSS mode is always a cache miss (L2 Semantic Cache is disabled)
-            None
-        })
+        Box::pin(async { None })
     }
 
     fn store<'a>(
@@ -201,13 +175,9 @@ impl SemanticCachePort for OssSemanticCache {
         _trace_ctx: &'a crate::domain::models::TraceContext,
         _vector: &'a [f32],
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(async {
-            // OSS mode does not store in L2 Semantic Cache
-        })
+        Box::pin(async {})
     }
 }
-
-// ── MokaExecutionStore ────────────────────────────────────────────────────────
 
 use crate::domain::execution::{ExecutionContext, ExecutionState, IdempotencyKey, ToolExecution};
 use crate::domain::ports::{ExecutionStore, Reconciler, ReconciliationResult};
@@ -445,8 +415,6 @@ impl ExecutionStore for MokaExecutionStore {
     }
 }
 
-// ── OssReconciler ────────────────────────────────────────────────────────────
-
 pub struct OssReconciler;
 
 impl Reconciler for OssReconciler {
@@ -457,8 +425,6 @@ impl Reconciler for OssReconciler {
         Box::pin(async { Ok(ReconciliationResult::StillUnknown) })
     }
 }
-
-// ── OssToolTransport ──────────────────────────────────────────────────────────
 
 pub struct OssToolTransport;
 

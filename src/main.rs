@@ -15,15 +15,11 @@ use kryneth_gateway::infrastructure;
 
 use domain::models::{AppState, RoutingState};
 
-// ── Config defaults ───────────────────────────────────────────────────────────
-
 const DEFAULT_PORT: &str = "8080";
 const DEFAULT_COMPLIANCE_URL: &str = "http://127.0.0.1:8083";
 const DEFAULT_RATE_LIMIT_MAX: &str = "60";
 const DEFAULT_RATE_LIMIT_WINDOW: &str = "60";
 const HTTP_TIMEOUT_SECS: u64 = 120;
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Reads a required environment variable, panicking with a clear message on absence.
 fn require_env(key: &str) -> String {
@@ -44,8 +40,6 @@ where
         .parse::<T>()
         .unwrap_or_else(|_| panic!("{} must be a valid number", key))
 }
-
-// ── Entry point ───────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() {
@@ -68,21 +62,18 @@ async fn main() {
         tracing::warn!("JWT_SECRET not found in env. Auto-generated a secure session key for local development.");
     }
 
-    // ── Config ────────────────────────────────────────────────────────────────
     let port: u16 = parse_env("GATEWAY_PORT", DEFAULT_PORT);
-    let _jwt_secret = require_env("JWT_SECRET"); // strictly enforces presence at boot
+    let _jwt_secret = require_env("JWT_SECRET");
     let compliance_url = optional_env("COMPLIANCE_URL", DEFAULT_COMPLIANCE_URL);
     let dashboard_url = optional_env("DASHBOARD_URL", "http://localhost:5173");
     let rate_limit_max: u32 = parse_env("RATE_LIMIT_MAX_REQUESTS", DEFAULT_RATE_LIMIT_MAX);
     let rate_limit_window: u32 = parse_env("RATE_LIMIT_WINDOW_SECS", DEFAULT_RATE_LIMIT_WINDOW);
 
-    // ── Infrastructure clients ────────────────────────────────────────────────
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .expect("Failed to construct reqwest HTTP client");
 
-    // ── App state ─────────────────────────────────────────────────────────────
     let rate_limit_cache = Arc::new(dashmap::DashMap::new());
     let dashboard_metrics = Arc::new(domain::models::DashboardMetrics::new());
 
@@ -98,21 +89,17 @@ async fn main() {
     // the weigher. Without a weigher, max_capacity(10_000) means 10K entries,
     // which could exhaust RAM under a burst. With a weigher, it means 10 MB total.
     let circuit_breaker = moka::future::Cache::builder()
-        .max_capacity(10 * 1024 * 1024) // 10 MB ceiling
-        .weigher(|k: &String, _v: &()| -> u32 {
-            // key length + 64 bytes for HashMap node overhead
-            (k.len() + 64).min(u32::MAX as usize) as u32
-        })
+        .max_capacity(10 * 1024 * 1024)
+        .weigher(|k: &String, _v: &()| -> u32 { (k.len() + 64).min(u32::MAX as usize) as u32 })
         .time_to_live(std::time::Duration::from_secs(60))
         .build();
 
     // MEMORY BOUND: loop-fallback cache. Each AtomicU64 value is 8 bytes;
     // the key is the session_id string. 50 MB ceiling handles ~650K sessions.
     let loop_fallback_cache = moka::future::Cache::builder()
-        .max_capacity(50 * 1024 * 1024) // 50 MB ceiling
+        .max_capacity(50 * 1024 * 1024)
         .weigher(
             |k: &String, _v: &std::sync::Arc<std::sync::atomic::AtomicU64>| -> u32 {
-                // key + Arc overhead + AtomicU64 size
                 (k.len() + 64 + 8).min(u32::MAX as usize) as u32
             },
         )
@@ -149,16 +136,12 @@ async fn main() {
         .time_to_live(std::time::Duration::from_secs(300))
         .build();
 
-    // ── MCP Connection Registry ─────────────────────────────────────────────
     let mcp_registry = infrastructure::mcp_registry::McpConnectionRegistry::from_env();
-
-    // ── MCP Tool Schema Registry ────────────────────────────────────────────
     let tool_registry = kryneth_gateway::usecases::tool_router::ToolRegistry::from_env();
 
     let initial_config = {
         let config_path =
             std::env::var("ROUTING_CONFIG_PATH").unwrap_or_else(|_| "routing.yaml".to_string());
-        // Try current directory first, then fallback to kryneth_gateway/routing.yaml
         let mut file_content = std::fs::read_to_string(&config_path);
         if file_content.is_err() && config_path == "routing.yaml" {
             if let Ok(content) = std::fs::read_to_string("kryneth_gateway/routing.yaml") {
@@ -177,7 +160,6 @@ async fn main() {
                 {
                     Ok(mut parsed) => {
                         info!(path = %config_path, "Loaded OSS routing configuration successfully");
-                        // Resolve API keys from env if they are empty
                         for tenant_models in parsed.values_mut() {
                             for model_cfg in tenant_models.values_mut() {
                                 for target in &mut model_cfg.targets {
@@ -217,7 +199,6 @@ async fn main() {
         .client_configs
         .store(Arc::new(initial_client_configs));
 
-    // ── Telemetry / Billing / Auth Adapters ────────────────────────────────────
     let trace_store = Arc::new(dashmap::DashMap::new());
     let telemetry: Arc<dyn crate::domain::ports::TelemetryPort> = Arc::new(
         infrastructure::oss_adapters::OssTelemetry::new(trace_store.clone()),
@@ -292,7 +273,6 @@ async fn main() {
         )),
     });
 
-    // ── Start Port-based background workers ───────────────────────────────────
     state
         .rate_limiter
         .start_sync_worker(state.rate_limit_cache.clone());
@@ -301,7 +281,6 @@ async fn main() {
         .routing_config
         .start_subscriber(state.routing_state.clone(), state.mcp_registry.clone());
 
-    // ── Server ────────────────────────────────────────────────────────────────
     let app: Router = api::routes::create_router(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
 

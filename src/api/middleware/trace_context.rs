@@ -77,13 +77,9 @@ pub async fn trace_context_middleware(
         test_scenario,
     };
 
-    // Inject into request extensions so handlers can access it
     request.extensions_mut().insert(ctx);
-
-    // Call the next handler
     let mut response = next.run(request).await;
 
-    // Inject trace IDs into response headers for client correlation
     if let Ok(val) = HeaderValue::from_str(&trace_id) {
         response.headers_mut().insert("x-trace-id", val);
     }

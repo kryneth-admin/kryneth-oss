@@ -49,8 +49,6 @@ use serde_json::Value;
 use simd_json::prelude::ValueObjectAccess;
 use tracing::{debug, info, warn};
 
-// ── Phantom tool ─────────────────────────────────────────────────────
-
 /// Name of the virtual phantom tool injected into every stripped tools array.
 pub const PHANTOM_TOOL_NAME: &str = "get_tool_details";
 
@@ -70,8 +68,6 @@ fn phantom_tool_descriptor() -> Value {
         }
     })
 }
-
-// ── Embedding helpers (pre-computed at registration) ────────────────────────
 
 const EMB_DIM: usize = 128;
 
@@ -109,8 +105,6 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
-// ── Domain types ────────────────────────────────────────────────
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ToolDescriptor {
     pub name: String,
@@ -123,8 +117,6 @@ pub struct ToolDescriptor {
     pub embedding: Vec<f32>,
 }
 
-// ── Registry ──────────────────────────────────────────────────────────────────
-
 /// Immutable MCP tool registry loaded once at gateway startup.
 ///
 /// Concurrent read access is safe because the registry is wrapped in `Arc`
@@ -135,8 +127,6 @@ pub struct ToolRegistry {
     /// `tool_name` → index in `tools` for O(1) lookup.
     index: HashMap<String, usize>,
 }
-
-// ── Bumpalo io::Write adaptor ─────────────────────────────────────────────────
 
 /// Thin `io::Write` wrapper around `bumpalo::collections::Vec<u8>`.
 ///
@@ -155,8 +145,6 @@ impl<'arena> std::io::Write for BumpWriter<'arena> {
         Ok(())
     }
 }
-
-// ── Phrase table for schema-on-demand detection ───────────────────────────────
 
 #[allow(dead_code)]
 const SCHEMA_REQUEST_PHRASES: &[&str] = &[
@@ -189,11 +177,7 @@ fn strip_non_essential_metadata(val: &mut Value) {
     }
 }
 
-// ── impl ──────────────────────────────────────────────────────────────────────
-
 impl ToolRegistry {
-    // ── Constructors ──────────────────────────────────────────────────────────
-
     /// Creates an `Arc`-wrapped empty registry (safe no-op default).
     pub fn empty() -> Arc<Self> {
         Arc::new(Self {
@@ -252,8 +236,6 @@ impl ToolRegistry {
         }
     }
 
-    // ── Query helpers ─────────────────────────────────────────────────────────
-
     /// `true` when no tools are registered.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -303,8 +285,6 @@ impl ToolRegistry {
         }
         false
     }
-
-    // ── Schema-on-demand detection (keyword gate + embedding similarity) ────────
 
     fn full_schema_requested_set(&self, body: &Value) -> std::collections::HashSet<String> {
         const THRESHOLD: f32 = 0.35;
@@ -357,8 +337,6 @@ impl ToolRegistry {
         requested
     }
 
-    // ── Core injection ────────────────────────────────────────────────────────
-
     /// Strips `parameters` schemas from registered MCP tools in the outbound
     /// `tools` array and injects 1-line semantic summaries.
     ///
@@ -408,7 +386,6 @@ impl ToolRegistry {
         let mut modified = false;
 
         for tool in tools.iter_mut() {
-            // Navigate to function.name
             let name: String = {
                 let func = match tool.get("function") {
                     Some(f) => f,
@@ -420,7 +397,6 @@ impl ToolRegistry {
                 }
             };
 
-            // Only process tools that are in the registry.
             let descriptor = match self.lookup(&name) {
                 Some(d) => d,
                 None => continue,
@@ -445,7 +421,6 @@ impl ToolRegistry {
                 continue;
             }
 
-            // Default path: strip parameters and inject 1-line summary.
             if let Some(func_obj) = tool.get_mut("function").and_then(|f| f.as_object_mut()) {
                 // Apply safe AST stripping in-place to parameters if present
                 let had_schema = if let Some(params) = func_obj.get_mut("parameters") {
@@ -515,8 +490,6 @@ impl ToolRegistry {
         Some(owned)
     }
 
-    // ── Phantom tool interception ─────────────────────────────────────────────
-
     /// If the LLM called the phantom `get_tool_details` tool, resolves the
     /// requested schema from the in-memory cache and returns a synthetic
     /// tool-result response.  No external server is contacted.
@@ -571,8 +544,6 @@ impl ToolRegistry {
         serde_json::to_vec(&synthetic).ok()
     }
 }
-
-// ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {

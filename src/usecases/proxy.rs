@@ -23,8 +23,6 @@ use crate::error::GatewayError;
 use crate::infrastructure::llm_router;
 use crate::infrastructure::routing_strategy::RoutingStrategy;
 
-// ── Public types ─────────────────────────────────────────────────────────────
-
 pub enum ProxyBody {
     Buffered(Vec<u8>),
     Stream(axum::body::Body),
@@ -37,12 +35,8 @@ pub struct ProxyResult {
     pub cache_hit: bool,
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
 /// Rough chars-per-token estimate for prompt token counting.
 const CHARS_PER_TOKEN: usize = 4;
-
-// ── PII regex (compiled once) ─────────────────────────────────────────────────
 
 fn pii_regex() -> &'static Regex {
     static PII_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -76,8 +70,6 @@ fn pii_regex() -> &'static Regex {
         Regex::new(pattern).expect("Invalid PII Regex")
     })
 }
-
-// ── Main entry point ──────────────────────────────────────────────────────────
 
 fn get_requested_provider(state: &Arc<AppState>, tenant_id: &str, model_name: &str) -> String {
     state
@@ -116,15 +108,11 @@ fn get_requested_provider(state: &Arc<AppState>, tenant_id: &str, model_name: &s
 ///   raw sensitive data (PII) into the LLM context. The 64 KiB bounded scan is a mandatory
 ///   security trade-off for data-privacy compliance.
 fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<String> {
-    // ─────────────────────────────────────────────────────────────────────────
-    // PATH 1: OpenAI / Anthropic `messages` array — MERGED SINGLE-PASS
-    //
+    // OpenAI / Anthropic `messages` array — merged single-pass.
     // Iterates newest-to-oldest (rev). On each message:
     //   • If a tool/function execution marker is detected → return None immediately.
     //   • If a user message is found first → extract its text and break.
-    //
     // Single-pass O(N): detection and extraction share one reverse walk.
-    // ─────────────────────────────────────────────────────────────────────────
     if let Some(simd_json::BorrowedValue::Array(messages)) = payload.get("messages") {
         let mut semantic_text = String::new();
 
@@ -132,7 +120,7 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
             let msg = &messages[i];
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
-            // ── Agentic bypass: tool / function response role ─────────────
+            // Agentic bypass: tool / function response role
             if role == "tool" || role == "function" {
                 tracing::debug!(
                     "Agentic tool response turn detected (role={}); bypassing semantic cache",
@@ -141,7 +129,7 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                 return None;
             }
 
-            // ── Agentic bypass: assistant with active tool invocations ────
+            // Agentic bypass: assistant with active tool invocations
             if role == "assistant" {
                 if msg
                     .get("tool_calls")
@@ -177,7 +165,7 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                 continue;
             }
 
-            // ── Agentic bypass: Anthropic tool content blocks (non-assistant roles) ──
+            // Agentic bypass: Anthropic tool content blocks (non-assistant roles)
             // Catches `tool_result` in user-role messages (the tool response turn).
             if let Some(content_blocks) = msg.get("content").and_then(|c| c.as_array()) {
                 for block in content_blocks {
@@ -192,7 +180,7 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
                 }
             }
 
-            // ── Extraction: most recent user message ──────────────────────
+            // Extraction: most recent user message
             if role == "user" {
                 if let Some(content) = msg.get("content") {
                     if let Some(text) = content.as_str() {
@@ -226,10 +214,8 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PATH 2: Anthropic legacy `prompt` string format
+    // Anthropic legacy `prompt` string format:
     // No tool-turn markers exist in this format; extract the most recent Human turn.
-    // ─────────────────────────────────────────────────────────────────────────
     if let Some(prompt) = payload.get("prompt").and_then(|p| p.as_str()) {
         let mut clean_prompt = prompt;
         if let Some(human_idx) = prompt.rfind("\n\nHuman:") {
@@ -248,14 +234,11 @@ fn extract_semantic_text(payload: &simd_json::BorrowedValue<'_>) -> Option<Strin
         };
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // PATH 3: Google Gemini `contents` array — TWO-PASS
-    //
+    // Google Gemini `contents` array — two-pass:
     // Pass 1 (forward): detect functionCall / functionResponse in any part.
     //   These appear in `model`-role content, not user-role content, so a single
     //   reverse walk cannot reliably detect and extract in one pass.
     // Pass 2 (reverse): extract the most recent `user`-role text parts.
-    // ─────────────────────────────────────────────────────────────────────────
     if let Some(simd_json::BorrowedValue::Array(contents)) = payload.get("contents") {
         // Pass 1: agentic bypass detection (forward iteration on contents)
         for content in contents {
@@ -693,7 +676,7 @@ pub async fn execute_proxy(
     let raw_prompt: &str =
         std::str::from_utf8(body_bytes).map_err(|e| GatewayError::InvalidJSON(e.to_string()))?;
 
-    // ── Stage 0: PII Redaction (fail-closed, zero-copy scan) ─────────────────
+    // PII Redaction (fail-closed, zero-copy scan):
     // extract_semantic_text_raw reads body_bytes directly without .to_vec().
     // The regex runs only on extracted text nodes (≤64 KiB), never on Base64
     // image blobs. Pure-image payloads return None → is_pii_match = false.
@@ -731,7 +714,6 @@ pub async fn execute_proxy(
 
     let mut parse_buffer = body_bytes.to_vec();
 
-    // ── Stage 1 & 2: Speculative Cache & Router Prep ──────────────────────────
     // Isolate inspection buffer to prevent `simd_json` in-place mutation of `parse_buffer`
     let (is_streaming, semantic_text) = {
         let mut inspect_buf = parse_buffer.clone();
@@ -749,7 +731,7 @@ pub async fn execute_proxy(
 
     let semantic_text_str = semantic_text.as_deref().unwrap_or("");
 
-    // ── NEW PRECEDENCE RULE: Check Exact Cache BEFORE embedding ───────────────
+    // Check Exact Cache before embedding
     if test_scenario.is_none() {
         if let Some(cached_content) = state.l1_cache.get_exact(tenant_id, raw_prompt).await {
             info!(tenant_id = %tenant_id, "L1 Exact Cache HIT (Fast Path)!");
@@ -772,7 +754,7 @@ pub async fn execute_proxy(
         }
     }
 
-    // Step 1: Speculatively generate embedding if semantic text exists
+    // Speculatively generate embedding if semantic text exists
     let embedding_vector: Option<Vec<f32>> = if test_scenario.is_none()
         && client_config.semantic_cache_enabled
         && state.semantic_cache.is_enabled()
@@ -863,7 +845,6 @@ pub async fn execute_proxy(
 
     let prep = prep_result?;
 
-    // ── Stage 1.5 & 1.6: Pre-flight checks (Token-Bucket & Loop Detection) ─────
     let token_future = async { Ok::<(), GatewayError>(()) };
     let loop_future = crate::usecases::behavior_guard::enforce_loop_detection(
         state,
@@ -880,14 +861,13 @@ pub async fn execute_proxy(
             _ => "__preflight_blocked",
         };
 
-        // 1. Update metrics
         state
             .dashboard_metrics
             .total_latency_ms
             .fetch_add(latency_ms as usize, std::sync::atomic::Ordering::Relaxed);
         // Note: enforce_loop_detection already incremented blocked_agent_loops.
 
-        // 2. Log dual payloads to ClickHouse/tracer
+        // Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
             "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
@@ -924,19 +904,17 @@ pub async fn execute_proxy(
         return Err(e);
     }
 
-    // ── Stage 1.7: Burn-Rate Control ─────────────────────────────────────────
     if let Err(e) =
         crate::usecases::behavior_guard::enforce_burn_rate(state, &trace_ctx.session_id).await
     {
         let latency_ms = start_time.elapsed().as_millis() as u32;
 
-        // 1. Update Metrics
         state
             .dashboard_metrics
             .total_latency_ms
             .fetch_add(latency_ms as usize, std::sync::atomic::Ordering::Relaxed);
 
-        // 2. Log dual payloads to ClickHouse/tracer
+        // Log dual payloads to ClickHouse/tracer
         let req_payload = serde_json::json!({
             "id": trace_ctx.trace_id.clone(),
             "tenant_id": tenant_id,
@@ -973,10 +951,6 @@ pub async fn execute_proxy(
         return Err(e);
     }
 
-    // ── Stage 1.8: Circuit-Breaker / Adaptive Fallback ────────────────────────
-
-    // ── Stage 2 & 3: Dynamic Provider Key Resolution and Routing with Fallback ─
-
     // [OBSERVABILITY] Structural dispatch log — never dumps raw payload bytes so
     // unredacted PII cannot leak into log aggregators via the debug pipeline.
     tracing::debug!(
@@ -986,7 +960,6 @@ pub async fn execute_proxy(
         "Dispatching payload to upstream LLM provider"
     );
 
-    // ── Stage 1.9: Deferred Billing Balance Guard ────────────────────────────
     struct RequestExtensions<'a>(&'a axum::http::Extensions);
     impl<'a> RequestExtensions<'a> {
         fn extensions(&self) -> &axum::http::Extensions {
@@ -1063,7 +1036,6 @@ pub async fn execute_proxy(
         "Received response from upstream LLM provider"
     );
 
-    // ── Stage 4a: SSE Streaming Path ─────────────────────────────────────────
     if is_streaming {
         return handle_streaming_response(
             state,
@@ -1091,7 +1063,6 @@ pub async fn execute_proxy(
         );
     }
 
-    // ── Stage 4b: Buffered (non-streaming) Path ───────────────────────────────
     handle_buffered_response(
         state,
         upstream_response,
@@ -1115,8 +1086,6 @@ pub async fn execute_proxy(
     )
     .await
 }
-
-// ── Pipeline stage helpers ────────────────────────────────────────────────────
 
 /// Returns a `ProxyResult` from a semantic-cache hit and fires background telemetry.
 #[allow(clippy::too_many_arguments)]
@@ -1176,7 +1145,6 @@ fn handle_cache_hit(
         let cached_content = cached_content.clone();
 
         tokio::spawn(async move {
-            // Chunk 1: Role initialization
             let chunk1 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
@@ -1198,7 +1166,6 @@ fn handle_cache_hit(
                 return;
             }
 
-            // Chunk 2: Content delivery
             let chunk2 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
@@ -1219,7 +1186,6 @@ fn handle_cache_hit(
                 return;
             }
 
-            // Chunk 3: Finish reason stop
             let chunk3 = json!({
                 "id": mock_id,
                 "object": "chat.completion.chunk",
@@ -1238,7 +1204,6 @@ fn handle_cache_hit(
                 return;
             }
 
-            // Terminal [DONE]
             let _ = tx
                 .send(Ok(bytes::Bytes::from("data: [DONE]\n\n".to_string())))
                 .await;
@@ -1352,7 +1317,6 @@ fn handle_streaming_response(
             while let Some(chunk_res) = active_stream.next().await {
                 match chunk_res {
                     Ok(chunk) => {
-                        // Check for error signatures
                         if has_error_signature(&chunk) {
                             tracing::warn!(
                                 "Detected error signature in streaming chunk from provider {}",
@@ -1380,14 +1344,12 @@ fn handle_streaming_response(
             }
 
             if !failed {
-                // Stream finished successfully!
                 break;
             }
 
-            // If we reached here, the active stream failed. Try fallbacks!
             let mut fallback_succeeded = false;
             while let Some(target) = prep.fallback_targets.first().cloned() {
-                prep.fallback_targets.remove(0); // Consume this fallback
+                prep.fallback_targets.remove(0);
 
                 tracing::info!(
                     model = %prep.model,
@@ -1423,7 +1385,6 @@ fn handle_streaming_response(
                             active_stream = resp.bytes_stream();
                             current_provider = config.id.clone();
 
-                            // Update shared state for telemetry safely
                             if let Ok(mut p_guard) = shared_executed_provider.lock() {
                                 *p_guard = config.id.clone();
                             }
@@ -1466,8 +1427,7 @@ fn handle_streaming_response(
     let body_stream =
         axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(client_rx));
 
-    // Spawn a lightweight task to parse tokens and record telemetry.
-    // Uses ReceiverStream (bounded) instead of UnboundedReceiverStream.
+    // Uses ReceiverStream (bounded) instead of UnboundedReceiverStream to enforce heap bounds.
     tokio::spawn(async move {
         let mut total_tokens = 0u32;
         let mut response_text = String::new();
@@ -1487,7 +1447,6 @@ fn handle_streaming_response(
                     }
 
                     if let Ok(v) = serde_json::from_str::<Value>(&data) {
-                        // 1. Extract token usage if available
                         if let Some(usage) = v.get("usage") {
                             if let Some(total) = usage.get("total_tokens").and_then(|t| t.as_u64())
                             {
@@ -1495,7 +1454,7 @@ fn handle_streaming_response(
                             }
                         }
 
-                        // 2. Incremental parsing of content deltas to reconstruct response_text
+                        // Incremental parsing of content deltas to reconstruct response text:
                         // OpenAI stream format: choices[0].delta.content
                         if let Some(content) = v["choices"][0]["delta"]["content"].as_str() {
                             if response_text.len() + content.len() < MAX_STREAM_BUFFER_BYTES {
@@ -1627,7 +1586,6 @@ async fn handle_buffered_response(
 
     let estimated_tokens = (raw_prompt.len() / CHARS_PER_TOKEN).max(1) as u32;
 
-    // ── Tunnel 3 Phase 3: MCP Sandbox Firewall ───────────────────────────────
     // Inspect the (now-unified) response for tool_calls and apply OPA RBAC.
     // Fail-open: if OPA is unreachable or times out, the original bytes are
     // returned unchanged.  Zero overhead on the non-agentic path: the fast
@@ -1635,7 +1593,6 @@ async fn handle_buffered_response(
     let body_bytes =
         crate::usecases::behavior_guard::enforce_mcp_sandbox(state, tenant_id, body_bytes).await?;
 
-    // ── Tunnel 3 Phase 2: Phantom tool interception ───────────────────────────
     // If the LLM called the phantom `get_tool_details` tool, resolve the
     // schema from cache and replace body_bytes — no external call needed.
     let mut body_bytes = if !state.tool_registry.is_empty() {
@@ -1649,7 +1606,6 @@ async fn handle_buffered_response(
         body_bytes
     };
 
-    // ── Tunnel 3 Phase 4: Flow-Based Parallel Fan-Out ────────────────────────
     // If the (sandbox-cleared) response contains tool_calls AND every called
     // tool is registered in the MCP registry, dispatch all calls concurrently.
     // Results are merged and forwarded to the telemetry channel so the next
@@ -1805,8 +1761,6 @@ fn attach_tool_results(
         .map_err(|e| GatewayError::ResponseBuild(format!("Failed to serialize MCP results: {e}")))
 }
 
-// ── Telemetry helpers ─────────────────────────────────────────────────────────
-
 /// Convenience wrapper: spawns `fire_async_telemetry` in a detached Tokio task.
 #[allow(clippy::too_many_arguments)]
 fn spawn_telemetry(
@@ -1909,7 +1863,7 @@ async fn fire_async_telemetry(
 
     let response_content = extract_response_content(response_bytes.as_deref());
 
-    // 1. Clickhouse bulk batched payload
+    // ClickHouse bulk batched payload.
     let payload = json!({
         "id": trace_ctx.trace_id.clone(),
         "tenant_id": tenant_id,
@@ -1929,7 +1883,7 @@ async fn fire_async_telemetry(
 
     state.telemetry.log_event(payload);
 
-    // 2. Tracer deep payload sent synchronously
+    // Tracer deep payload sent synchronously.
     let trace_payload = json!({
         "trace_id":        trace_ctx.trace_id,
         "session_id":      trace_ctx.session_id,
@@ -1954,17 +1908,15 @@ async fn fire_async_telemetry(
 
     state.telemetry.log_event(trace_payload);
 
-    // 3. Cache injection for successful misses
+    // Cache injection for successful misses.
     if semantic_cache_enabled && !cache_hit && status_code == 200 && !response_content.is_empty() {
         if let (Some(ref vec), false) = (&embedding_vector, semantic_text.is_empty()) {
-            // Smart Token-based Routing & Background Sync
             if tokens < 1000 {
                 info!(
                     tenant_id = %tenant_id,
                     tokens = tokens,
                     "Cache injection: inserting response into L1 (exact + semantic) and L2 (semantic) caches."
                 );
-                // Save in BOTH L1 and L2
                 if let Err(e) = state
                     .l1_cache
                     .insert(tenant_id, raw_prompt, semantic_text, &response_content, vec)
@@ -2031,7 +1983,7 @@ async fn fire_async_telemetry(
         );
     }
 
-    // 4. Billing Engine Precautionary Credit Deduction & Analytics Telemetry
+    // Runtime billing telemetry credit deduction.
     if status_code == 200 {
         let prompt_tokens = (raw_prompt.len() / CHARS_PER_TOKEN).max(1) as u64;
         let completion_tokens = (tokens as u64).saturating_sub(prompt_tokens);
@@ -2096,8 +2048,6 @@ pub fn process_runtime_billing_telemetry(
     Ok(())
 }
 
-// ── Small pure helpers ────────────────────────────────────────────────────────
-
 /// Extracts `choices[0].message.content` from a raw OpenAI-format JSON body, or falls back to raw UTF-8 string.
 fn extract_response_content(bytes: Option<&[u8]>) -> String {
     let Some(b) = bytes else {
@@ -2111,9 +2061,7 @@ fn extract_response_content(bytes: Option<&[u8]>) -> String {
     String::from_utf8_lossy(b).into_owned()
 }
 
-// ── Compliance helper ─────────────────────────────────────────────────────────
-
-/// POSTs `payload` to the compliance redaction endpoint and returns the
+/// Recursively sanitizes PII in JSON values using inline regex patterns.
 fn local_sanitize_pii_value(val: &Value) -> Value {
     match val {
         Value::String(s) => {
@@ -2190,11 +2138,8 @@ async fn call_compliance_redact(
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
-    // super::* use panna, mela irukkura pii_regex() function inga kedaikum
     use super::*;
 
     #[test]
@@ -2320,7 +2265,6 @@ mod tests {
     fn test_pii_regex_matches_credit_card() {
         let regex = pii_regex();
         let prompt = "My credit card number is 1234-5678-9012-3456, please don't share it.";
-        // assert! na "ithu unmai nu prove pannu" nu artham. Match aagalana test fail aagum.
         assert!(regex.is_match(prompt));
     }
 
@@ -2335,7 +2279,7 @@ mod tests {
     fn test_pii_regex_ignores_safe_prompt() {
         let regex = pii_regex();
         let prompt = "What is the capital of Tamil Nadu? Explain in 50 words.";
-        // assert! false check pannuthu. Safe prompt-a adhu block panna koodathu.
+        // Verify safe prompts without sensitive data do not trigger false-positive PII filter detections.
         assert!(!regex.is_match(prompt));
     }
 
@@ -2343,10 +2287,9 @@ mod tests {
     async fn test_telemetry_mpsc_channel_flow() {
         use tokio::sync::mpsc;
 
-        // 1. Channel create pandrom (Capacity 100 logs)
         let (tx, mut rx) = mpsc::channel::<String>(100);
 
-        // 2. Gateway Producer: User request vantha udane channel-la data poduthu
+        // Producer: Emulate gateway task asynchronously dispatching telemetry events into the channel.
         tokio::spawn(async move {
             tx.send("Log 1: Tenant A used 400 tokens".to_string())
                 .await
@@ -2356,14 +2299,12 @@ mod tests {
                 .unwrap();
         });
 
-        // 3. Background Worker (Consumer): Channel-la irunthu data-va edukuthu
+        // Consumer: Verify background worker drains queued events in FIFO order.
         let first_log = rx.recv().await.unwrap();
         assert_eq!(first_log, "Log 1: Tenant A used 400 tokens");
 
         let second_log = rx.recv().await.unwrap();
         assert_eq!(second_log, "Log 2: Tenant B latency 45ms");
-
-        // Ippadi thaan channel ulla data pass aaguthu nu compile aagi prove aagidum!
     }
 
     #[test]
@@ -2892,8 +2833,6 @@ mod tests {
         );
     }
 
-    // ── extract_semantic_text_raw unit tests ──────────────────────────────────
-
     #[test]
     fn test_raw_scanner_openai_string_content() {
         let body = serde_json::json!({
@@ -3059,8 +2998,6 @@ mod tests {
             "Outbound transmission buffer must retain all backslashes and XML tags without in-place mutation corruption"
         );
     }
-
-    // ── extract_semantic_text agentic bypass unit tests ───────────────────────
 
     #[test]
     fn test_extract_semantic_text_single_turn_user() {

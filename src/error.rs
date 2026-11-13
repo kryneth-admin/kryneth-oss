@@ -15,7 +15,6 @@ use thiserror::Error;
 /// maps each to a safe HTTP status + opaque error code.
 #[derive(Debug, Error)]
 pub enum GatewayError {
-    // ── Auth & Access ────────────────────────────────────────────────────────
     #[error("Missing or invalid API key")]
     Unauthorized,
 
@@ -23,7 +22,6 @@ pub enum GatewayError {
     #[error("Insufficient permissions")]
     Forbidden,
 
-    // ── Resource Errors ──────────────────────────────────────────────────────
     /// Tenant UUID was validated but no matching tenant row exists.
     #[error("Tenant not found")]
     TenantNotFound,
@@ -32,7 +30,6 @@ pub enum GatewayError {
     #[error("Invalid tenant ID format")]
     InvalidTenantId,
 
-    // ── Infrastructure ───────────────────────────────────────────────────────
     /// ClickHouse or Postgres query failure. Internal details are logged;
     /// the client receives only the opaque `DATABASE_ERROR` code.
     #[error("Database error: {0}")]
@@ -56,7 +53,6 @@ pub enum GatewayError {
     #[error("Gateway internal error: {0}")]
     Proxy(reqwest::Error),
 
-    // ── Business Rules ───────────────────────────────────────────────────────
     #[error("Compliance block: {0}")]
     ComplianceFailure(String),
 
@@ -111,7 +107,7 @@ impl axum::response::IntoResponse for GatewayError {
         use axum::http::StatusCode;
         use axum::Json;
 
-        // ── Internal-only: AgentLoopBudgetExceeded returns OpenAI-spec body ──
+        // AgentLoopBudgetExceeded returns an OpenAI-compatible error response body.
         if let GatewayError::AgentLoopBudgetExceeded(_) = &self {
             let body = Json(serde_json::json!({
                 "error": {
@@ -129,7 +125,6 @@ impl axum::response::IntoResponse for GatewayError {
             return res;
         }
 
-        // ── Map variant → (status, opaque_code, safe_message) ────────────────
         // SECURITY: `message` is what the client sees. Internal details (DB
         // query strings, stack traces) are logged separately below.
         let (status, code, message) = match &self {
@@ -153,7 +148,6 @@ impl axum::response::IntoResponse for GatewayError {
                 "INVALID_TENANT_ID",
                 "Tenant ID is not a valid UUID.",
             ),
-            // DatabaseError: 500, safe message — detail is logged not exposed
             GatewayError::DatabaseError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "DATABASE_ERROR",
@@ -272,7 +266,6 @@ impl axum::response::IntoResponse for GatewayError {
             ),
         };
 
-        // ── Structured server-side logging — full internal detail ─────────────
         match &self {
             GatewayError::DatabaseError(_)
             | GatewayError::ResponseBuild(_)

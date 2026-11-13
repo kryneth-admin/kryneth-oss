@@ -102,9 +102,8 @@ impl L1Cache {
             .build();
 
         let embed_client = {
-            // Safe fallback sequence for local Windows TCP architecture
             let tcp_url = std::env::var("EMBEDDING_TCP_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string()); // Default target embedding sync macro
+                .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
             let url = if tcp_url.trim().is_empty() {
                 "http://127.0.0.1:8081"
             } else {
@@ -116,7 +115,7 @@ impl L1Cache {
                 url
             );
             let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_millis(150)) // Set smooth overhead window
+                .timeout(std::time::Duration::from_millis(150))
                 .build()
                 .map_err(|e| GatewayError::ResponseBuild(format!("Failed to build client: {e}")))?;
 
@@ -192,8 +191,6 @@ impl L1Cache {
             .filter(|w| !w.is_empty());
 
         let first_word = words.next();
-
-        // 1. Check if first word is weak or strong
         if let Some(first) = first_word {
             for &t in &strong_tokens {
                 if first == t {
@@ -207,7 +204,6 @@ impl L1Cache {
             }
         }
 
-        // 2. Check subsequent words ONLY for strong tokens
         for word in words {
             for &t in &strong_tokens {
                 if word == t {
@@ -244,7 +240,7 @@ impl L1Cache {
         let word_count = prompt.split_whitespace().count();
         let threshold = if word_count <= 8 { 0.06 } else { 0.14 };
 
-        // 1. Extract valid cache candidates under the RwLock read guard into an owned vector.
+        // Extract valid cache candidates under the RwLock read guard into an owned vector.
         // This keeps the read lock hold time minimal and prevents deadlocks/starvation.
         let candidates: Vec<(Vec<f32>, String, String)> = {
             let queue = self.semantic_cache.read().await;
@@ -259,7 +255,7 @@ impl L1Cache {
                 .collect()
         };
 
-        // 2. Offload the dense O(N) cosine similarity distance calculations and threshold evaluation
+        // Offload the dense O(N) cosine similarity distance calculations and threshold evaluation
         // entirely to tokio::task::spawn_blocking to prevent async executor worker thread starvation.
         let result = tokio::task::spawn_blocking(move || {
             let mut best_dist = f32::MAX;
@@ -306,7 +302,6 @@ impl L1Cache {
     ) -> Result<(), GatewayError> {
         let key = Self::exact_cache_key(tenant_id, exact_prompt);
 
-        // Insert exact
         self.exact_cache.insert(key, response.to_string()).await;
 
         let vector = Self::normalize_vec(vector);

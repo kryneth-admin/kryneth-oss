@@ -67,7 +67,6 @@ impl ExecutionService {
         let start = std::time::Instant::now();
         let policy = resolve_tool_policy(&tool_name);
 
-        // 1. Resolve execution identity
         let exec_id = ExecutionId(
             trace_ctx
                 .execution_id
@@ -123,7 +122,6 @@ impl ExecutionService {
             IdempotencyKey(hex::encode(hasher.finalize()))
         };
 
-        // 2. Load or create the claim
         let initial_execution = ToolExecution {
             execution_id: exec_id.clone(),
             operation_id: operation_id.clone(),
@@ -159,7 +157,6 @@ impl ExecutionService {
             }
         };
 
-        // 3. Reason about existing state / auto-retry block
         if claim_state == ExecutionState::Succeeded {
             let content = claim_ctx.result_content.clone().unwrap_or_default();
             let latency_ms = claim_ctx.latency_ms.unwrap_or(0);
@@ -173,7 +170,6 @@ impl ExecutionService {
         }
 
         if claim_state == ExecutionState::Running {
-            // Already in flight
             state
                 .dashboard_metrics
                 .mcp_already_in_flight_blocked
@@ -194,7 +190,6 @@ impl ExecutionService {
                 let mut content_out = String::new();
                 let mut latency_out = 0u64;
 
-                // Transition state to Reconciling
                 let _ = state
                     .execution_store
                     .transition(
@@ -205,7 +200,6 @@ impl ExecutionService {
                     )
                     .await;
 
-                // Try reconciliation
                 let recon_res = state.reconciler.reconcile(&initial_execution).await;
                 match recon_res {
                     Ok(ReconciliationResult::Succeeded { content }) => {
@@ -302,7 +296,6 @@ impl ExecutionService {
             }
         }
 
-        // 4. Mark running and execute tool call
         let version = claim_ctx.version;
         let _ = state
             .execution_store
@@ -360,7 +353,6 @@ impl ExecutionService {
             res
         });
 
-        // Wait for execution with policy timeout
         let exec_timeout = std::time::Duration::from_secs(policy.timeout_seconds);
         let exec_res = tokio::time::timeout(exec_timeout, exec_handle).await;
 
@@ -397,7 +389,6 @@ impl ExecutionService {
             }
         };
 
-        // 5. Emit Telemetry
         let latency_ms = start.elapsed().as_millis() as u64;
         let final_state = if result.success {
             ExecutionState::Succeeded
@@ -440,8 +431,6 @@ impl ExecutionService {
         result
     }
 }
-
-// ── Unit Tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -580,7 +569,6 @@ mod tests {
         Arc::new(state)
     }
 
-    // A. Same business operation
     #[tokio::test]
     async fn test_same_business_operation_deduplication() {
         let call_count = Arc::new(AtomicUsize::new(0));
@@ -610,7 +598,6 @@ mod tests {
             arguments: r#"{"amount":100}"#.to_string(),
         };
 
-        // First attempt
         let res1 =
             ExecutionService::execute_tool(&state, tc.clone(), "tenant1", &trace_ctx, 0, 1, false)
                 .await;
@@ -618,7 +605,6 @@ mod tests {
         assert_eq!(res1.content, r#"{"status":"ok"}"#);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
-        // Second attempt
         let res2 =
             ExecutionService::execute_tool(&state, tc.clone(), "tenant1", &trace_ctx, 0, 1, false)
                 .await;
@@ -627,7 +613,6 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // execution count stays 1!
     }
 
-    // B. Same arguments, different business operation
     #[tokio::test]
     async fn test_same_arguments_different_operation() {
         let call_count = Arc::new(AtomicUsize::new(0));
