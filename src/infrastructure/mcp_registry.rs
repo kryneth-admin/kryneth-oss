@@ -23,8 +23,6 @@ pub fn mcp_warmed_key(tenant_id: &str, tool_name: &str) -> String {
     format!("{}::{}", tenant_id, tool_name)
 }
 
-// ── FSM ───────────────────────────────────────────────────────────────────────
-
 /// States for the `NameScanFsm`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FsmState {
@@ -119,8 +117,6 @@ impl NameScanFsm {
     }
 }
 
-// ── PreWarmedConnection ───────────────────────────────────────────────────────
-
 /// Records the outcome of a speculative warm-up for a single MCP tool endpoint.
 /// Stored in `McpConnectionRegistry::warmed`; read by Phase 4 fan-out.
 pub struct PreWarmedConnection {
@@ -140,16 +136,12 @@ impl PreWarmedConnection {
     }
 }
 
-// ── ToolMetrics ──────────────────────────────────────────────────────────────
-
 /// Stores execution telemetry for a registered MCP tool.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct ToolMetrics {
     pub call_count: u64,
     pub total_latency_ms: u64,
 }
-
-// ── Registry ──────────────────────────────────────────────────────────────────
 
 pub struct McpConnectionRegistry {
     /// tool_name → (endpoint URL, environment variables) (read-only after construction).
@@ -165,8 +157,6 @@ pub struct McpConnectionRegistry {
 }
 
 impl McpConnectionRegistry {
-    // ── Constructors ──────────────────────────────────────────────────────────
-
     pub fn empty() -> Arc<Self> {
         Arc::new(Self {
             registry: DashMap::new(),
@@ -212,8 +202,6 @@ impl McpConnectionRegistry {
         })
     }
 
-    // ── Telemetry & dynamic metrics ──────────────────────────────────────────
-
     /// Records execution telemetry for an MCP tool call (zero-copy, concurrent, tenant-scoped).
     pub fn record_tool_call(&self, tenant_id: &str, tool_name: &str, latency_ms: u64) {
         let key = mcp_warmed_key(tenant_id, tool_name);
@@ -249,8 +237,6 @@ impl McpConnectionRegistry {
     pub fn remove_server(&self, name: &str) {
         self.registry.remove(name);
     }
-
-    // ── Query helpers ─────────────────────────────────────────────────────────
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -309,8 +295,6 @@ impl McpConnectionRegistry {
         None
     }
 
-    // ── Warm-up ───────────────────────────────────────────────────────────────
-
     /// Fires a non-blocking HEAD request to pre-warm the TCP/TLS connection
     /// for `sse_url`, then records the outcome in `registry.warmed`.
     ///
@@ -363,7 +347,6 @@ impl McpConnectionRegistry {
             }
         };
 
-        // Write the outcome into the stateful handoff map.
         let cache_key = mcp_warmed_key(&tenant_id, &tool_name);
         registry.warmed.insert(
             cache_key,
@@ -377,8 +360,6 @@ impl McpConnectionRegistry {
         // `_permit` is dropped here → semaphore slot released.
     }
 }
-
-// ── Unit Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -399,8 +380,6 @@ mod tests {
             tool_metrics: DashMap::new(),
         }
     }
-
-    // ── FSM correctness tests ─────────────────────────────────────────────────
 
     #[test]
     fn test_fsm_finds_name_in_one_chunk() {
@@ -453,8 +432,6 @@ mod tests {
         );
     }
 
-    // ── Semaphore backpressure tests ──────────────────────────────────────────
-
     #[test]
     fn test_semaphore_allows_up_to_20() {
         let reg = make_registry(&[]);
@@ -466,17 +443,13 @@ mod tests {
                     .expect("should acquire"),
             );
         }
-        // 21st must fail
         assert!(
             Arc::clone(&reg.prefetch_sem).try_acquire_owned().is_err(),
             "21st acquire should be rejected"
         );
-        // Drop one permit — 21st now succeeds
         drop(permits.pop());
         assert!(Arc::clone(&reg.prefetch_sem).try_acquire_owned().is_ok());
     }
-
-    // ── PreWarmedConnection ───────────────────────────────────────────────────
 
     #[test]
     fn test_prewarmed_connection_freshness() {

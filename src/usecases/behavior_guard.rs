@@ -333,7 +333,6 @@ async fn enforce_oss_tool_calls(
         .insert(storm_key, storm_count)
         .await;
 
-    // Process using the Unified Abstraction
     for tc in tool_calls {
         let unified_tool = match UnifiedToolCall::from_borrowed_value(tc) {
             Some(tool) => tool,
@@ -387,8 +386,6 @@ pub async fn enforce_burn_rate(
 #[instrument(skip(_state), fields(session_id = %session_id, cost))]
 pub async fn record_session_spend(_state: &Arc<AppState>, session_id: &str, _cost: f64) {}
 
-// ── Tunnel 3 Phase 3: MCP Sandbox Firewall (Fail-Closed) ────────────────────
-
 /// Returns `true` when the sandbox should fail-open (legacy / non-production).
 ///
 /// Reads `SANDBOX_FALLBACK_MODE` env var once per request.
@@ -413,7 +410,6 @@ pub async fn enforce_mcp_sandbox(
     tenant_id: &str,
     response_body: Vec<u8>,
 ) -> Result<Vec<u8>, GatewayError> {
-    // ── Fast-path: simd-json scan for tool_calls ─────────────────────────────
     let has_tool_calls = response_body
         .windows(b"tool_calls".len())
         .any(|w| w == b"tool_calls");
@@ -422,7 +418,6 @@ pub async fn enforce_mcp_sandbox(
         return Ok(response_body);
     }
 
-    // ── Parse full body to extract tool_calls ────────────────────────────────
     let mut body_val: serde_json::Value = match serde_json::from_slice(&response_body) {
         Ok(v) => v,
         Err(_) => return Ok(response_body),
@@ -448,7 +443,6 @@ pub async fn enforce_mcp_sandbox(
         vec!["unknown_tool".to_string()]
     };
 
-    // ── Non-blocking OPA RBAC check ──────────────────────────────────────────
     let fail_open = sandbox_is_fail_open();
     let mut check_futures = Vec::new();
 
@@ -529,7 +523,6 @@ pub async fn enforce_mcp_sandbox(
         return Ok(response_body);
     }
 
-    // ── Compact Soft-Steering Mutation ────────────────────────────────────────
     let logged_tool = denied_tool.unwrap_or_else(|| "unknown_tool".to_string());
     tracing::warn!(
         tenant_id = %tenant_id,
@@ -680,7 +673,6 @@ mod tests {
 
         let session_id = "test-session-oss";
 
-        // Test 1 (Valid Progression)
         for i in 1..=3 {
             let body = serde_json::json!({
                 "messages": [{
@@ -698,7 +690,6 @@ mod tests {
             assert!(res.is_ok(), "Valid progression failed on iteration {}", i);
         }
 
-        // Test 2 (Runaway Loop)
         let loop_body = serde_json::json!({
             "messages": [{
                 "role": "assistant",
@@ -720,7 +711,6 @@ mod tests {
         let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentRunawayLoop(_))));
 
-        // Test 3 (Tool Storm)
         let session_id_storm = "test-session-storm";
         let mut tools = Vec::new();
         for i in 1..=21 {
@@ -742,7 +732,6 @@ mod tests {
             enforce_oss_agent_guardian(&state, "test-tenant", session_id_storm, &storm_bytes).await;
         assert!(matches!(res, Err(GatewayError::AgentToolStorm(_))));
 
-        // Test 4 (Time Window Decay)
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let res = enforce_oss_agent_guardian(&state, "test-tenant", session_id, &loop_bytes).await;
         assert!(res.is_ok(), "Cache did not expire");

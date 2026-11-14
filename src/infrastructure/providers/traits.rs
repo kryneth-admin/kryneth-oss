@@ -6,7 +6,6 @@ use crate::error::GatewayError;
 
 /// Trait defining the contract for provider-specific tool adapters and payload translators.
 pub trait UniversalProviderAdapter: Send + Sync {
-    // ── Tool Protocol ────────────────────────────────────────────────────────
     /// Extracts UniversalToolCall items from a provider's raw response payload.
     fn extract_calls(&self, raw_payload: &[u8]) -> Result<Vec<UniversalToolCall>, GatewayError>;
 
@@ -16,7 +15,6 @@ pub trait UniversalProviderAdapter: Send + Sync {
         results: &[UniversalToolResult],
     ) -> Result<serde_json::Value, GatewayError>;
 
-    // ── Core Translation Protocol ────────────────────────────────────────────
     /// Converts a provider-specific request payload into a universal KrynethConversation.
     fn to_universal(&self, payload: &mut [u8]) -> Result<KrynethConversation, GatewayError>;
 

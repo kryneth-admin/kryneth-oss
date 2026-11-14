@@ -1,7 +1,7 @@
 //! src/domain/billing.rs — 2026 Official Provider Pricing Registry & Models.
 //!
 //! Exposes pricing types and standard rates for premier and open-source models,
-//! incorporating defensive fallback structures (Samalikkira Buffer).
+//! incorporating defensive fallback structures (Defensive Ceiling Buffer).
 
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ pub struct PrecautionaryRate {
 /// At proxy time, `AppState.pricing_map` takes priority over this function.
 /// The dynamic engine calls this only when a lookup miss occurs in the live map.
 ///
-/// ## Samalikkira Buffer (Defensive Ceiling)
+/// ## Defensive Ceiling Buffer
 /// Any zero-day or unknown model/provider defaults to the **Premier Ceiling**
 /// ($20.00 input / $60.00 output per 1M) — i.e., we always over-estimate rather
 /// than under-bill, preventing unintended free-riding by unlisted models.
@@ -51,7 +51,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
     let p = provider.to_lowercase();
     let m = target_model.to_lowercase();
 
-    // ── OpenAI ───────────────────────────────────────────────────────────────
     if p.contains("openai") {
         if m.contains("o1-mini") {
             return PrecautionaryRate {
@@ -95,7 +94,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         }
     }
 
-    // ── Anthropic ────────────────────────────────────────────────────────────
     if p.contains("anthropic") {
         if m.contains("claude-3-5-sonnet") || m.contains("claude-3.5-sonnet") {
             return PrecautionaryRate {
@@ -129,7 +127,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         }
     }
 
-    // ── Google / Gemini ───────────────────────────────────────────────────────
     if p.contains("google") || p.contains("gemini") {
         if m.contains("gemini-1.5-pro") {
             return PrecautionaryRate {
@@ -153,7 +150,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         }
     }
 
-    // ── DeepSeek ─────────────────────────────────────────────────────────────
     if p.contains("deepseek") {
         if m.contains("deepseek-r1") {
             return PrecautionaryRate {
@@ -165,7 +161,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
                 agent_loop_multiplier: 1.0,
             };
         }
-        // deepseek-chat / v3
         return PrecautionaryRate {
             pricing_type: PricingType::TokenBased,
             input_cost_per_1m: 0.14,
@@ -176,7 +171,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         };
     }
 
-    // ── Groq (Developer Free Tier) ────────────────────────────────────────────
     if p.contains("groq") {
         return PrecautionaryRate {
             pricing_type: PricingType::TokenBased,
@@ -188,7 +182,6 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         };
     }
 
-    // ── Open-Source / Self-Hosted Buffer Ceiling ──────────────────────────────
     // Catches qwen, llama, mistral, mixtral, phi, falcon, etc.
     let is_open_source = m.contains("llama")
         || m.contains("mistral")
@@ -209,10 +202,9 @@ pub fn lookup_precautionary_rate(provider: &str, target_model: &str) -> Precauti
         };
     }
 
-    // ── Samalikkira Buffer: Premier Defensive Ceiling ─────────────────────────
-    // Any unlisted/zero-day model defaults to the protective premier ceiling.
+    // Any unlisted or zero-day model defaults to the protective premier ceiling.
     // We always over-estimate cost to prevent unintended free usage of unknown models.
-    let _ = (provider, target_model); // suppress unused warnings
+    let _ = (provider, target_model);
     PrecautionaryRate {
         pricing_type: PricingType::TokenBased,
         input_cost_per_1m: 20.00,

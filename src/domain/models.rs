@@ -33,7 +33,6 @@ pub struct AppState {
     pub dashboard_url: String,
     pub llm_api_base_url: Option<String>,
     pub redis_client: Option<redis::Client>,
-    // ── Dependency-inverted ports (OSS ↔ Enterprise swappable) ────────────────
     pub telemetry: Arc<dyn TelemetryPort>,
     pub billing: Arc<dyn BillingPort>,
     pub auth_resolver: Arc<dyn AuthPort>,
@@ -49,7 +48,6 @@ pub struct AppState {
     /// Enterprise: dispatches real gRPC lookup/store RPCs.
     /// OSS: always returns None (cache miss) — no tonic dependency.
     pub semantic_cache: Arc<dyn SemanticCachePort>,
-    // ── Process-local, always-present infrastructure ───────────────────────────
     pub rate_limit_cache: std::sync::Arc<dashmap::DashMap<String, std::sync::Arc<LocalBucket>>>,
     pub l1_cache: std::sync::Arc<crate::infrastructure::l1_cache::L1Cache>,
     pub routing_state: std::sync::Arc<RoutingState>,
@@ -68,7 +66,6 @@ pub struct AppState {
     pub agent_guardian_cache: moka::future::Cache<String, u32>,
     /// Semantic MCP Idempotency & Safe-Retry operation cache.
     pub operation_cache: moka::future::Cache<String, OperationCacheEntry>,
-    // ── Dependency-inverted execution ports ───────────────────────────────────
     pub execution_store: Arc<dyn crate::domain::ports::ExecutionStore>,
     pub reconciler: Arc<dyn crate::domain::ports::Reconciler>,
     pub tool_transport: Arc<dyn crate::domain::ports::ToolTransport>,
@@ -299,10 +296,6 @@ pub struct ScopedBudget {
     pub emergency_kill_switch: bool,
 }
 
-// ==============================================================================
-// Virtual API Key Phase 1: Multi-LLM Architecture Models
-// ==============================================================================
-
 /// Account type for tenant workspaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -424,7 +417,6 @@ mod tests {
             ]
         }"#;
 
-        // Verify Deserialization from JSON String
         let conversation: KrynethConversation =
             serde_json::from_str(json_str).expect("Failed to deserialize Universal Schema JSON");
 
@@ -437,11 +429,9 @@ mod tests {
         assert_eq!(conversation.messages[1].role, KrynethRole::Assistant);
         assert_eq!(conversation.messages[2].role, KrynethRole::Tool);
 
-        // Verify Serialization back to JSON with no data loss
         let serialized_str =
             serde_json::to_string(&conversation).expect("Failed to serialize back to json");
 
-        // Parse both as serde_json::Value to ignore whitespace formatting differences
         let original_val: serde_json::Value = serde_json::from_str(json_str).unwrap();
         let serialized_val: serde_json::Value = serde_json::from_str(&serialized_str).unwrap();
 

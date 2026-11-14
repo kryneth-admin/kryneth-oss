@@ -1,0 +1,73 @@
+# Kryneth Gateway
+
+> Kryneth is the open-source execution-integrity layer and agent runtime control plane for AI systems that can take consequential actions against real-world systems.
+
+Kryneth provides a neutral, deterministic execution boundary between AI-generated intent and external side effects (financial transactions, cloud infrastructure mutations, database writes, CRM/ERP updates, communications, and Model Context Protocol tool invocations). Built in Rust on Axum and Tokio, it enforces execution identity, deterministic SHA-256 idempotency, monotonic lease versioning, stale completion fencing, and explicit `UNKNOWN` outcome state handling—preventing unsafe side-effect replay when networks time out or agents fail.
+
+## Core Concepts & Invariants
+
+- [Execution Boundary](ARCHITECTURE.md): The structural boundary where an AI-generated action becomes a physical side effect (`AI Agent -> Kryneth -> External System`).
+- [Execution State Machine](src/domain/execution.rs): Explicit execution lifecycle states (`Pending`, `Claimed`, `Running`, `Succeeded`, `Failed`, `Unknown`, `Reconciling`).
+- [Timeout != Failure Invariant](README.md#the-failure-scenario-timeout--failure): When an upstream network drops or times out after downstream dispatch, Kryneth marks the state as `UNKNOWN` rather than `Failed`, blocking blind retries (`PREVIOUS_ATTEMPT_UNKNOWN`) and triggering out-of-band reconciliation.
+- [Deterministic Idempotency](src/infrastructure/mcp_client.rs): Deeply key-sorted canonical JSON SHA-256 hashing producing authoritative `IdempotencyKey` instances immune to JSON key-ordering variation.
+- [Monotonic Lease Versioning & Stale Completion Fencing](src/usecases/execution_service.rs): Incremental `version: u64` tagging that fences out late-arriving detached background completions from overwriting newer execution state.
+- [Agent Guardian](src/usecases/behavior_guard.rs): Ephemeral nonce-agnostic `ahash` parameter signature tracking detecting runaway agent loops and tool storms (default limit: 5 identical calls per session).
+- [Two-Phase Lazy Schema Loading](src/usecases/tool_router.rs): Strips bulky MCP parameter JSON schemas down to 1-line semantic summaries on default turns, reducing per-tool token overhead by ~95% while serving full schemas on-demand via virtual phantom tool interception.
+- [Memory-Bounded L1/L2 Semantic Caching](src/infrastructure/l1_cache.rs): Moka-based in-memory cache with explicit byte weighers enforcing strict heap limits (default: 100 KB semantic limit; >= 1000 tokens relegated to L2 to prevent RAM exhaustion).
+- [ReDoS-Safe PII Firewall](src/usecases/proxy.rs): DFA-compatible, non-backtracking regular expressions scanning for Credit Cards, SSNs, Aadhaar, Emails, Phone Numbers, and IFSC codes.
+
+## Repository Architecture & Code Organization
+
+- [Clean Architecture / Ports & Adapters](ARCHITECTURE.md#ports--adapters-clean-architecture): Domain core decoupled from transport and storage via traits (`ToolTransport`, `ExecutionStore`, `Reconciler`, `AuthResolver`, `RateLimiter`).
+- [Ingress API (`src/api/`)](src/api/routes.rs): Axum HTTP routes for OpenAI-compatible `/v1/chat/completions`, `/v1/models`, health probes `/healthz`, and admin metrics `/metrics`.
+- [Domain Core (`src/domain/`)](src/domain/models.rs): Strongly-typed domain models, execution identity hierarchy (`Tenant -> Session -> Workflow -> Execution -> Operation -> Attempt`), and port definitions.
+- [Infrastructure Adapters (`src/infrastructure/`)](src/infrastructure/oss_adapters.rs): In-memory OSS implementations (`MokaExecutionStore`, `OssTelemetry`, `OssBilling`, `OssRateLimit`) and provider adapters (OpenAI, Anthropic, Gemini, Bedrock, Cohere).
+- [Use Cases (`src/usecases/`)](src/usecases/execution_service.rs): Application pipelines including `execution_service.rs` (idempotency & lease orchestration), `behavior_guard.rs` (loop & tool storm detection), `proxy.rs` (streaming failover stitching & telemetry), and `tool_router.rs` (semantic MCP schema optimizer).
+- [Adversarial Verification Harnesses (`tests/`)](tests/agent_db_reliability_test.rs): Comprehensive end-to-end integration tests proving zero duplicate mutations under commit-then-timeout failures, high-concurrency thundering herds, and network flaps.
+
+## Quick Start & Ingress Integration
+
+### Docker Deployment
+```bash
+docker run -d -p 8080:8080 krynethhq/krynethgw:latest
+```
+
+### Route Agent Traffic via OpenAI SDK
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="your-api-key"
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "Process refund for order #1234"}],
+    extra_headers={
+        "x-kryneth-tenant-id": "tenant-prod-01",
+        "x-kryneth-idempotency-key": "idem-refund-1234"
+    }
+)
+```
+
+### Direct HTTP Request
+```bash
+curl -X POST http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer test-key" \
+  -H "x-kryneth-tenant-id: acme-corp" \
+  -H "x-kryneth-idempotency-key: charge-tx-9921" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "Execute database migration"}]
+  }'
+```
+
+## Key Documentation & References
+
+- [Documentation Hub](docs.json): Mintlify documentation index covering architecture, security models, deployment, and SDK integrations.
+- [Adversarial Database Reliability Test](tests/agent_db_reliability_test.rs): Test suite verifying transaction rollback recovery, commit-then-timeout deduplication, and runaway loop prevention.
+- [Deterministic Payment Execution Test](tests/payment_execution_test.rs): Test suite proving zero duplicate financial transactions across socket drops, lease fencing, and concurrent duplicate races.
+- [Security Model & Vulnerability Reporting](SECURITY.md): Security practices, ReDoS mitigations, and disclosure policies.
+- [Benchmarking & Performance Profiles](BENCHMARKS.md): High-throughput sub-millisecond proxy routing and memory benchmarks.

@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// ── 1. Compliance Configuration ─────────────────────────────────────────────
-
 /// Determines the strictness and active rules for PII redaction and policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompliancePolicy {
@@ -23,8 +21,6 @@ pub struct CompliancePolicy {
     pub fail_closed: bool,
 }
 
-// ── 2. Data Residency Routing Rules ─────────────────────────────────────────
-
 /// Rules mapping regions/geographies to specific upstream LLM endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResidencyRule {
@@ -37,8 +33,6 @@ pub struct ResidencyRule {
     /// Whether data is allowed to leave this region
     pub strict_isolation: bool,
 }
-
-// ── 3. OPA Request/Response Payloads ────────────────────────────────────────
 
 /// The payload sent to Open Policy Agent for evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,8 +63,6 @@ pub struct OpaResult {
     /// The reason for blocking, if `allow` is false
     pub block_reason: Option<String>,
 }
-
-// ── 4. Immutable Audit Log Schema ───────────────────────────────────────────
 
 /// Represents a single append-only audit event for compliance telemetry.
 /// PII is strictly excluded from this struct.

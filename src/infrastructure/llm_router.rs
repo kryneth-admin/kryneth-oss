@@ -81,7 +81,6 @@ pub struct PreparedUpstreamRequest {
 }
 
 pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
-    // Scan first 8KB or so
     let scan_limit = body_bytes.len().min(8192);
     let slice = &body_bytes[..scan_limit];
     if let Some(pos) = slice.windows(7).position(|w| w == b"\"model\"") {
@@ -114,7 +113,6 @@ pub fn extract_model_fast(body_bytes: &[u8]) -> Result<String, GatewayError> {
         return Err(GatewayError::MissingModel);
     }
 
-    // Fallback for smaller cases
     #[derive(serde::Deserialize)]
     struct ExtractModel<'a> {
         #[serde(borrow)]
@@ -139,14 +137,11 @@ pub async fn prep_upstream_request(
     _strategy: RoutingStrategy,
     test_scenario: Option<&str>,
 ) -> Result<PreparedUpstreamRequest, GatewayError> {
-    // 1. Extract the model from the incoming request using the fast-path scanner
     let model_owned = extract_model_fast(body_bytes)?;
     let model = model_owned.as_str();
 
-    // 2. Load the lock-free state
     let routing_guard = state.routing_state.state.load();
 
-    // 3. Lookup the model for the specific tenant
     tracing::debug!("LOOKUP: Tenant: '{}', Model: '{}'", tenant_id, model);
 
     let tenant_models = routing_guard
@@ -191,12 +186,10 @@ pub async fn prep_upstream_request(
         return Err(GatewayError::NoActiveKeys);
     }
 
-    // 4. Sort and filter out circuit-breaker-blacklisted targets.
     let mut sorted_targets = model_config.targets.clone();
 
     sorted_targets.sort_by_key(|t| t.priority);
 
-    // Drain targets that are currently open-circuited, collecting healthy ones.
     let mut healthy_targets: Vec<UpstreamTarget> = Vec::with_capacity(sorted_targets.len());
     for target in sorted_targets {
         let cb_key = circuit_breaker_key(tenant_id, &target.api_key_alias);
@@ -216,7 +209,6 @@ pub async fn prep_upstream_request(
         return Err(GatewayError::NoActiveKeys);
     }
 
-    // The first healthy target is our primary target; the rest are ordered fallbacks.
     let mut healthy_targets_iter = healthy_targets.into_iter();
     // Safe: we already checked healthy_targets is non-empty above.
     let primary_target = healthy_targets_iter
@@ -279,7 +271,6 @@ pub async fn execute_upstream_request(
         Ok(response) => {
             let status = response.status().as_u16();
             if !is_retryable_error(status) {
-                // Primary key succeeded — is_hot_swapped = 0
                 return Ok((
                     response,
                     prep.primary_target.api_key_alias.clone(),
@@ -293,7 +284,6 @@ pub async fn execute_upstream_request(
                 status = status,
                 "Primary target returned retryable status code — triggering circuit breaker"
             );
-            // Open circuit breaker for 30s
             let cb_key = circuit_breaker_key(&prep.tenant_id, &prep.primary_target.api_key_alias);
             state.circuit_breaker.insert(cb_key, ()).await;
 
@@ -313,7 +303,6 @@ pub async fn execute_upstream_request(
         }
     }
 
-    // Try fallbacks in priority order
     for (i, fallback) in prep.fallback_targets.clone().into_iter().enumerate() {
         let cb_key = circuit_breaker_key(&prep.tenant_id, &fallback.api_key_alias);
         if state.circuit_breaker.get(&cb_key).await.is_some() {
@@ -494,7 +483,6 @@ pub fn build_provider_request(
         AuthScheme::GoogleApiKey => builder, // Included in URL query
     };
 
-    // 3. Conditional Translation (Zero-Copy proxy for OpenAI schemas)
     // If request payload > 5MB, bypass payload rewriting or translation entirely,
     // and build the request directly using body_bytes.clone().
     let request = if body_bytes.len() > 5 * 1024 * 1024 {
@@ -517,7 +505,6 @@ pub fn build_provider_request(
 
         request.json(&final_body)
     } else {
-        // True Decoupling via Payload Rewriting (Phase 3)
         // Mutate the `model` field using simd-json in-place, then re-serialize using
         // simd_json::to_vec (NOT serde_json) to avoid OwnedValue → serde round-trip corruption.
         let rewritten_bytes = rewrite_model_field(body_bytes, upstream_target_model)
@@ -565,10 +552,8 @@ pub(crate) fn rewrite_model_field(
             match b {
                 b'"' => {
                     in_string = true;
-                    // Check if this is the "model" key at depth 1
                     if depth == 1 && body_bytes[i..].starts_with(b"\"model\"") {
                         let mut j = i + b"\"model\"".len();
-                        // Skip whitespace
                         while j < body_bytes.len() && body_bytes[j].is_ascii_whitespace() {
                             j += 1;
                         }
@@ -612,8 +597,6 @@ pub(crate) fn rewrite_model_field(
     Err("Could not find \"model\" field for zero-copy rewrite".to_string())
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,8 +607,6 @@ mod tests {
     use std::sync::Arc;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    // ── SIMD Payload Mutation Tests ───────────────────────────────────────────
 
     #[test]
     fn test_rewrite_model_field_produces_valid_json() {
@@ -642,21 +623,17 @@ mod tests {
 
         let output = result.unwrap();
 
-        // Assert the output is valid UTF-8
         let output_str = std::str::from_utf8(&output).expect("output must be valid UTF-8");
 
-        // Assert it round-trips via standard serde_json (proves no structural corruption)
         let parsed: serde_json::Value =
             serde_json::from_str(output_str).expect("output must be valid JSON");
 
-        // Assert the model field was correctly swapped
         assert_eq!(
             parsed["model"].as_str().unwrap(),
             "llama3-8b-8192",
             "model field must be rewritten to the upstream target model"
         );
 
-        // Assert the messages array was preserved intact
         assert_eq!(
             parsed["messages"][0]["role"].as_str().unwrap(),
             "user",
@@ -680,7 +657,6 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
         assert_eq!(parsed["model"].as_str().unwrap(), "llama3-70b-8192");
-        // Verify numerics are NOT corrupted
         assert!(
             (parsed["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-9,
             "temperature float must not be corrupted: got {:?}",
@@ -805,8 +781,6 @@ mod tests {
         (Arc::new(state), mock_server)
     }
 
-    // ── PIPELINE CONTRACT TEST 3: Router virtual-model lookup ─────────────
-    //
     // Constructs a fake RoutingState with "my-prod-route" as the virtual model
     // name, injects a JSON body {"model": "my-prod-route"}, and asserts that
     // prep_upstream_request:
@@ -849,7 +823,6 @@ mod tests {
         map.insert(tenant_id.to_string(), tenant_map);
         state.routing_state.state.store(Arc::new(map));
 
-        // Simulate the exact client request body.
         let body = axum::body::Bytes::from(
             serde_json::json!({
                 "model": "my-prod-route",
@@ -892,7 +865,6 @@ mod tests {
             physical_model_name
         );
 
-        // The primary key must be selected.
         assert_eq!(prep.primary_target.api_key_alias, "primary");
         assert!(
             prep.fallback_targets.is_empty(),
@@ -902,8 +874,6 @@ mod tests {
         std::mem::forget(state);
     }
 
-    // ── PIPELINE CONTRACT TEST 3b: Trimming guard ─────────────────────────
-    //
     // Verifies that a client sending {"model": "my-prod-route "} (trailing space)
     // is still matched correctly to "my-prod-route" in the routing table.
     // Regression test for the trim() fix applied to prep_upstream_request.
@@ -933,7 +903,6 @@ mod tests {
         map.insert(tenant_id.to_string(), tenant_map);
         state.routing_state.state.store(Arc::new(map));
 
-        // Inject a model name with leading/trailing whitespace.
         let body = axum::body::Bytes::from(
             r#"{"model": "  clean-route  ", "messages": [{"role": "user", "content": "hi"}]}"#,
         );
@@ -963,7 +932,6 @@ mod tests {
     async fn test_circuit_breaker_blacklist_enforcement() {
         let (state, _) = setup_test_state().await;
 
-        // 1. Setup: 2 targets, target-1 is primary (priority 1)
         let mut tenant_map = HashMap::new();
         tenant_map.insert(
             "gpt-4".into(),
@@ -997,13 +965,11 @@ mod tests {
         map.insert("t1".into(), tenant_map);
         state.routing_state.state.store(Arc::new(map));
 
-        // 2. Blacklist key-1 (tenant-scoped key as used by the router)
         state
             .circuit_breaker
             .insert(circuit_breaker_key("t1", "key-1"), ())
             .await;
 
-        // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
         let prep = prep_upstream_request(
@@ -1017,7 +983,6 @@ mod tests {
         .await
         .unwrap();
 
-        // 4. Verify: key-2 should have been selected as primary (prep.fallback_targets should be empty)
         assert_eq!(
             prep.fallback_targets.len(),
             0,
@@ -1032,7 +997,6 @@ mod tests {
     async fn test_circuit_breaker_tripping() {
         let (state, mock_server) = setup_test_state().await;
 
-        // 1. Setup: Model with a failing target
         let mut tenant_map = HashMap::new();
         tenant_map.insert(
             "gpt-4".into(),
@@ -1054,13 +1018,11 @@ mod tests {
         map.insert("t1".into(), tenant_map);
         state.routing_state.state.store(Arc::new(map));
 
-        // 2. Mock: Provider returns 429
         Mock::given(method("POST"))
             .respond_with(ResponseTemplate::new(429))
             .mount(&mock_server)
             .await;
 
-        // 3. Prep request
         let body = axum::body::Bytes::from(r#"{"model": "gpt-4"}"#);
         let mut body_mut = body.to_vec();
         let prep = prep_upstream_request(
@@ -1075,7 +1037,6 @@ mod tests {
         .unwrap();
         let _ = execute_upstream_request(&state, prep, &mut body_mut).await;
 
-        // 4. Verify: Breaker is now open for "fail-key" under tenant t1
         let is_blacklisted = state
             .circuit_breaker
             .get(&circuit_breaker_key("t1", "fail-key"))

@@ -50,7 +50,6 @@ pub fn resolve_session_id(
         .as_secs();
     hasher.update(entropy.to_le_bytes());
 
-    // Hash up to the first 256 bytes of the payload
     let max_len = cmp::min(256, raw_payload.len());
     hasher.update(&raw_payload[..max_len]);
 
@@ -75,18 +74,15 @@ mod tests {
 
     #[test]
     fn test_session_id_generation_fallback() {
-        // Fallback with idempotency key
         let sid_idem = resolve_session_id(None, Some("idem-456"), "tenant-abc", "sk-123", b"{}");
         assert_eq!(sid_idem, "tenant-abc_idem-456");
 
-        // Hash fallback
         let payload1 = b"some long payload string that exceeds the max length or is just right";
         let sid_hash1 = resolve_session_id(None, None, "tenant-abc", "sk-123", payload1);
 
         let payload2 = b"some long payload string that exceeds the max length or is just right";
         let sid_hash2 = resolve_session_id(None, None, "tenant-abc", "sk-123", payload2);
 
-        // Deterministic
         assert_eq!(sid_hash1, sid_hash2);
 
         let sid_hash_diff = resolve_session_id(

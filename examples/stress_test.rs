@@ -15,7 +15,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\u{1f680} Starting Kryneth Gateway Performance Benchmark...");
 
-    // --- Scenario A: Cache Hits (1000 Concurrent Requests) ---
     println!("\n[Scenario A] Testing Cache Throughput (1000 requests)...");
     let start = Instant::now();
     let mut handles = vec![];
@@ -53,7 +52,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Total Time: {:?}", duration);
     println!("  - Requests/sec: {:.2}", 1000.0 / duration.as_secs_f64());
 
-    // --- Scenario B: Heavy PII (Rayon Parallelism) ---
     println!("\n[Scenario B] Testing Heavy PII (50k tokens)...");
     let heavy_payload =
         "Safe text. ".repeat(10000) + "email@example.com" + &"Safe text. ".repeat(10000);

@@ -55,7 +55,6 @@ pub async fn orchestrate(
 ) -> Result<AgenticContext, GatewayError> {
     let mut loop_count: Option<u64> = None;
 
-    // ── Agentic Loop Budget Enforcement ──────────────────────────────────────
     if is_agentic {
         let resolved_session_id = crate::usecases::agentic_tracker::resolve_session_id(
             session_id,
@@ -90,15 +89,13 @@ pub async fn orchestrate(
                 c
             }
             Err(e) => {
-                // Early loop budget rejection!
-                // 1. Update Metrics
                 state
                     .dashboard_metrics
                     .total_latency_ms
                     .fetch_add(latency_ms as usize, std::sync::atomic::Ordering::Relaxed);
                 // Note: enforce_agentic_loop_budget already handles state.dashboard_metrics.blocked_agent_loops.
 
-                // 2. Log dual payloads to ClickHouse/tracer
+                // Log dual payloads to ClickHouse/tracer
                 let req_payload = serde_json::json!({
                     "id": uuid::Uuid::new_v4().to_string(),
                     "tenant_id": tenant_id,
@@ -139,7 +136,6 @@ pub async fn orchestrate(
         loop_count = Some(count_val);
     }
 
-    // ── Tunnel 3 Phase 1: Speculative MCP Pre-Fetching ────────────────────────
     // FSM-based byte scan — zero-allocation, chunk-boundary safe.
     // Semaphore: 20 in-flight permits. If full, drop silently (best-effort).
     if !state.mcp_registry.is_empty() {
@@ -173,7 +169,6 @@ pub async fn orchestrate(
         }
     }
 
-    // ── Tunnel 3 Phase 2: Lazy Schema Loading via Bumpalo Arena ──────────────
     // Arena is stack-allocated; holds intermediate byte slices during JSON
     // serialisation. Freed in O(1) when this block exits.
     //
